@@ -481,7 +481,6 @@ export default function DashboardPage() {
     position: d.position,
     status: d.status,
     battery: d.battery,
-    target: d.target,
     searchPattern: d.status === "SEARCHING" && d.assignedSector ? generateSearchPattern(d.position, d.assignedSector) : [],
   }))
 
