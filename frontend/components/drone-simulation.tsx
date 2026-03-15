@@ -1,9 +1,16 @@
 "use client"
 
-import { useRef, useMemo, useState, useEffect } from "react"
+import { useRef, memo, useCallback } from "react"
 import { Canvas, useFrame } from "@react-three/fiber"
-import { OrbitControls, Grid, Text, Line } from "@react-three/drei"
-import * as THREE from "three"
+import { OrbitControls } from "@react-three/drei"
+
+// Split components for better memoization and WebGL stability
+import { TacticalGround, SectorZone, DisasterEnvironment, DebrisField, ChargingHub, SECTOR_DEFS } from "./3d/terrain"
+import { CoverageOverlay } from "./3d/coverage-overlay"
+import { Drone, FlightPaths, SearchTrail } from "./3d/drone-model"
+import { VictimMarker } from "./3d/victim-marker"
+
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface DroneData {
   id: string
@@ -22,367 +29,75 @@ interface VictimData {
   status?: "HIDDEN" | "DETECTED" | "RESCUE_OTW" | "RESCUED"
 }
 
-// Drone mesh component
-function Drone({ data, onSelect }: { data: DroneData; onSelect: (id: string) => void }) {
-  const meshRef = useRef<THREE.Group>(null)
-  const scanConeRef = useRef<THREE.Mesh>(null)
-  const [hovered, setHovered] = useState(false)
+// ─── Camera Tracker (writes azimuth to compass DOM element) ───────────────────
 
-  const statusColors: Record<string, string> = {
-    SEARCHING: "#3b82f6",
-    SCANNING: "#22c55e",
-    TRACKING: "#ef4444",
-    RECALLING: "#f59e0b",
-    IDLE: "#6b7280",
-    CHARGING: "#10b981",
-  }
-
-  const color = statusColors[data.status] || "#3b82f6"
-  const isLowBattery = data.battery < 20
-  const isScanning = data.status === "SCANNING" || data.status === "SEARCHING"
-  const isTracking = data.status === "TRACKING"
-
-  useFrame((state) => {
-    if (meshRef.current) {
-      // Hover animation
-      meshRef.current.position.y = data.position[1] + Math.sin(state.clock.elapsedTime * 2 + data.position[0]) * 0.1
-
-      // Rotate propellers effect (subtle)
-      meshRef.current.rotation.y += 0.02
-    }
-
-    if (scanConeRef.current && isScanning) {
-      scanConeRef.current.rotation.y += 0.05
-    }
+function CameraTracker({ compassRef }: { compassRef: React.RefObject<HTMLDivElement | null> }) {
+  useFrame(({ camera }) => {
+    if (!compassRef.current) return
+    const azimuth = Math.atan2(camera.position.x - 25, camera.position.z - 25)
+    compassRef.current.style.transform = `rotate(${-azimuth * (180 / Math.PI)}deg)`
   })
-
-  return (
-    <group
-      ref={meshRef}
-      position={data.position}
-      onClick={() => onSelect(data.id)}
-      onPointerOver={() => setHovered(true)}
-      onPointerOut={() => setHovered(false)}
-    >
-      {/* Drone body */}
-      <mesh>
-        <boxGeometry args={[0.8, 0.3, 0.8]} />
-        <meshStandardMaterial
-          color={isLowBattery ? "#f59e0b" : color}
-          emissive={isLowBattery ? "#f59e0b" : color}
-          emissiveIntensity={hovered ? 0.8 : 0.4}
-        />
-      </mesh>
-
-      {/* Propeller arms */}
-      {[
-        [0.5, 0, 0.5],
-        [-0.5, 0, 0.5],
-        [0.5, 0, -0.5],
-        [-0.5, 0, -0.5],
-      ].map((pos, i) => (
-        <mesh key={i} position={pos as [number, number, number]}>
-          <cylinderGeometry args={[0.15, 0.15, 0.05, 8]} />
-          <meshStandardMaterial color={color} emissive={color} emissiveIntensity={0.3} />
-        </mesh>
-      ))}
-
-      {/* Thermal scan cone */}
-      {isScanning && !isTracking && (
-        <mesh ref={scanConeRef} position={[0, -2, 0]} rotation={[Math.PI, 0, 0]}>
-          <coneGeometry args={[2, 4, 16, 1, true]} />
-          <meshStandardMaterial
-            color="#22c55e"
-            emissive="#22c55e"
-            emissiveIntensity={0.8}
-            transparent
-            opacity={0.2}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
-      
-      {/* Tracking beacon (red pulsing cone for victim lock) */}
-      {isTracking && (
-        <mesh ref={scanConeRef} position={[0, -1.5, 0]} rotation={[Math.PI, 0, 0]}>
-          <coneGeometry args={[1.5, 3, 16, 1, true]} />
-          <meshStandardMaterial
-            color="#ef4444"
-            emissive="#ef4444"
-            emissiveIntensity={1.2}
-            transparent
-            opacity={0.4}
-            side={THREE.DoubleSide}
-          />
-        </mesh>
-      )}
-
-      {/* Drone ID label */}
-      <Text
-        position={[0, 1, 0]}
-        fontSize={0.4}
-        color="#ffffff"
-        anchorX="center"
-        anchorY="middle"
-        font="/fonts/GeistMono-Bold.ttf"
-      >
-        {data.id}
-      </Text>
-
-      {/* Battery indicator */}
-      <mesh position={[0, 0.8, 0]}>
-        <boxGeometry args={[0.6, 0.1, 0.1]} />
-        <meshStandardMaterial color="#1a1a2e" />
-      </mesh>
-      <mesh position={[-(0.6 - data.battery / 100 * 0.6) / 2, 0.8, 0]}>
-        <boxGeometry args={[data.battery / 100 * 0.6, 0.08, 0.08]} />
-        <meshStandardMaterial
-          color={data.battery < 20 ? "#ef4444" : data.battery < 50 ? "#f59e0b" : "#22c55e"}
-          emissive={data.battery < 20 ? "#ef4444" : data.battery < 50 ? "#f59e0b" : "#22c55e"}
-          emissiveIntensity={0.5}
-        />
-      </mesh>
-    </group>
-  )
+  return null
 }
 
-// Search trail visualization
-function SearchTrail({ points }: { points: [number, number, number][] }) {
-  if (points.length < 2) return null
+// ─── Scene Content (isolated from dashboard state) ────────────────────────────
 
-  return (
-    <Line
-      points={points}
-      color="#3b82f6"
-      lineWidth={1}
-      transparent
-      opacity={0.3}
-      dashed
-      dashSize={0.5}
-      gapSize={0.2}
-    />
-  )
-}
-
-// Victim marker - only visible once detected by drone
-function VictimMarker({ data }: { data: VictimData }) {
-  const meshRef = useRef<THREE.Mesh>(null)
-  const ringRef = useRef<THREE.Mesh>(null)
-
-  // Color based on status
-  const isRescued = data.status === "RESCUED" || data.rescued
-  const isRescueOTW = data.status === "RESCUE_OTW"
-  const isDetected = data.status === "DETECTED"
-  
-  const color = isRescued ? "#22c55e" : isRescueOTW ? "#f59e0b" : "#ef4444"
-  const statusText = isRescued ? "RESCUED" : isRescueOTW ? "RESCUE OTW" : "VICTIM"
-
-  useFrame((state) => {
-    if (meshRef.current && !isRescued) {
-      meshRef.current.scale.setScalar(1 + Math.sin(state.clock.elapsedTime * 4) * 0.2)
-    }
-    if (ringRef.current && !isRescued) {
-      ringRef.current.rotation.z = state.clock.elapsedTime * 2
-    }
-  })
-
-  // Only show victim marker if detected/rescue_otw/rescued (not HIDDEN)
-  if (data.status === "HIDDEN" || (!data.trackingDroneId && !isRescued && !isRescueOTW)) return null
-
-  return (
-    <group position={data.position}>
-      <mesh ref={meshRef}>
-        <sphereGeometry args={[0.4, 16, 16]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={isRescued ? 0.3 : 1.0}
-        />
-      </mesh>
-      {/* Ground ring indicator */}
-      <mesh ref={ringRef} position={[0, 0.05, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.8, 1.2, 32]} />
-        <meshStandardMaterial
-          color={color}
-          emissive={color}
-          emissiveIntensity={0.5}
-          transparent
-          opacity={0.6}
-          side={THREE.DoubleSide}
-        />
-      </mesh>
-      {/* Status label */}
-      <Text
-        position={[0, 1.2, 0]}
-        fontSize={0.4}
-        color={color}
-        anchorX="center"
-        anchorY="middle"
-        font="/fonts/GeistMono-Bold.ttf"
-      >
-        {statusText}
-      </Text>
-      {/* Tracking drone info */}
-      {data.trackingDroneId && !isRescued && (
-        <Text
-          position={[0, 0.8, 0]}
-          fontSize={0.25}
-          color={isRescueOTW ? "#22c55e" : "#f59e0b"}
-          anchorX="center"
-          anchorY="middle"
-          font="/fonts/GeistMono-Regular.ttf"
-        >
-          {isRescueOTW ? `RESCUE DISPATCHED` : `TRACKING: ${data.trackingDroneId}`}
-        </Text>
-      )}
-    </group>
-  )
-}
-
-// Charging hub at origin
-function ChargingHub() {
-  const ringRef = useRef<THREE.Mesh>(null)
-
-  useFrame((state) => {
-    if (ringRef.current) {
-      ringRef.current.rotation.z = state.clock.elapsedTime * 0.5
-    }
-  })
-
-  return (
-    <group position={[0, 0, 0]}>
-      {/* Base platform */}
-      <mesh position={[0, -0.1, 0]}>
-        <cylinderGeometry args={[3, 3, 0.2, 32]} />
-        <meshStandardMaterial color="#0a2a1a" emissive="#22c55e" emissiveIntensity={0.1} />
-      </mesh>
-
-      {/* Glowing ring */}
-      <mesh ref={ringRef} position={[0, 0.05, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[2.5, 0.1, 8, 32]} />
-        <meshStandardMaterial color="#22c55e" emissive="#22c55e" emissiveIntensity={0.8} transparent opacity={0.8} />
-      </mesh>
-
-      {/* Center beacon */}
-      <mesh position={[0, 0.5, 0]}>
-        <cylinderGeometry args={[0.3, 0.3, 1, 16]} />
-        <meshStandardMaterial color="#22c55e" emissive="#22c55e" emissiveIntensity={0.6} />
-      </mesh>
-
-      <Text
-        position={[0, 1.5, 0]}
-        fontSize={0.5}
-        color="#22c55e"
-        anchorX="center"
-        anchorY="middle"
-        font="/fonts/GeistMono-Bold.ttf"
-      >
-        CHARGING HUB
-      </Text>
-    </group>
-  )
-}
-
-// Grid floor
-function TacticalGrid() {
-  return (
-    <>
-      <Grid
-        position={[0, -0.01, 0]}
-        args={[100, 100]}
-        cellSize={5}
-        cellThickness={0.5}
-        cellColor="#1a3a5c"
-        sectionSize={10}
-        sectionThickness={1}
-        sectionColor="#2a5a8c"
-        fadeDistance={80}
-        fadeStrength={1}
-        infiniteGrid={false}
-      />
-
-      {/* Sector labels */}
-      {["A", "B", "C", "D"].map((sector, i) => {
-        const positions: [number, number, number][] = [
-          [-25, 0.1, -25],
-          [25, 0.1, -25],
-          [-25, 0.1, 25],
-          [25, 0.1, 25],
-        ]
-        return (
-          <Text
-            key={sector}
-            position={positions[i]}
-            fontSize={3}
-            color="#3b82f6"
-            anchorX="center"
-            anchorY="middle"
-            rotation={[-Math.PI / 2, 0, 0]}
-            font="/fonts/GeistMono-Bold.ttf"
-          >
-            {`SECTOR ${sector}`}
-          </Text>
-        )
-      })}
-    </>
-  )
-}
-
-// Scene content
-function SceneContent({
+const SceneContent = memo(function SceneContent({
   drones,
   victims,
-  selectedDrone,
   onSelectDrone,
+  compassRef,
 }: {
   drones: DroneData[]
   victims: VictimData[]
-  selectedDrone: string | null
   onSelectDrone: (id: string) => void
+  compassRef: React.RefObject<HTMLDivElement | null>
 }) {
   return (
     <>
+      <fog attach="fog" args={["#0a1520", 100, 250]} />
+      <color attach="background" args={["#0a1520"]} />
+
       {/* Lighting */}
-      <ambientLight intensity={0.3} />
-      <directionalLight position={[50, 50, 25]} intensity={0.5} />
-      <pointLight position={[0, 20, 0]} intensity={0.5} color="#3b82f6" />
+      <ambientLight intensity={1.2} color="#b0d4ff" />
+      <directionalLight position={[30, 60, 40]} intensity={1.5} color="#ffffff" />
+      <pointLight position={[0, 10, 0]} color="#22c55e" intensity={5} distance={30} decay={2} />
 
-      {/* Environment */}
-      <fog attach="fog" args={["#0a0a14", 50, 150]} />
-      <color attach="background" args={["#0a0a14"]} />
-
-      {/* Grid */}
-      <TacticalGrid />
-
-      {/* Charging Hub */}
+      {/* Static terrain (heavily memoized) */}
+      <TacticalGround />
+      {SECTOR_DEFS.map((def) => <SectorZone key={def.id} def={def} />)}
+      <DisasterEnvironment />
+      <DebrisField />
       <ChargingHub />
 
-      {/* Drones */}
+      {/* Dynamic elements */}
+      <CoverageOverlay drones={drones} />
+      <FlightPaths drones={drones} />
+
       {drones.map((drone) => (
         <group key={drone.id}>
           <Drone data={drone} onSelect={onSelectDrone} />
           <SearchTrail points={drone.searchPattern} />
         </group>
       ))}
+      {victims.map((victim) => <VictimMarker key={victim.id} data={victim} />)}
 
-      {/* Victims */}
-      {victims.map((victim) => (
-        <VictimMarker key={victim.id} data={victim} />
-      ))}
+      <CameraTracker compassRef={compassRef} />
 
-      {/* Camera controls */}
       <OrbitControls
-        enablePan={true}
-        enableZoom={true}
-        enableRotate={true}
-        minDistance={10}
-        maxDistance={100}
-        maxPolarAngle={Math.PI / 2.2}
-        target={[0, 0, 0]}
+        enablePan
+        enableZoom
+        enableRotate
+        minDistance={8}
+        maxDistance={140}
+        maxPolarAngle={Math.PI / 2.1}
+        target={[25, 0, 25]}
       />
     </>
   )
-}
+})
+
+// ─── Main Export ──────────────────────────────────────────────────────────────
 
 export default function DroneSimulation({
   drones,
@@ -395,42 +110,109 @@ export default function DroneSimulation({
   selectedDrone: string | null
   onSelectDrone: (id: string) => void
 }) {
+  const compassRef = useRef<HTMLDivElement>(null)
+  const activeAlerts = victims.filter((v) => v.status === "DETECTED").length
+  const rescuedCount = victims.filter((v) => v.status === "RESCUED" || v.rescued).length
+  const searchingCount = drones.filter((d) => d.status === "SEARCHING").length
+  const trackingCount = drones.filter((d) => d.status === "TRACKING").length
+
+  // Memoize callback to prevent unnecessary re-renders
+  const handleSelectDrone = useCallback((id: string) => {
+    onSelectDrone(id)
+  }, [onSelectDrone])
+
   return (
-    <div className="w-full h-full relative">
+    <div className="w-full h-full relative bg-[#030810]">
       <Canvas
-        camera={{ position: [40, 30, 40], fov: 60 }}
-        gl={{ antialias: true }}
-        dpr={[1, 2]}
+        camera={{ position: [25, 48, 90], fov: 52, near: 0.1, far: 300 }}
+        gl={{ antialias: true, powerPreference: "high-performance" }}
+        dpr={[1, 1.5]}
       >
         <SceneContent
           drones={drones}
           victims={victims}
-          selectedDrone={selectedDrone}
-          onSelectDrone={onSelectDrone}
+          onSelectDrone={handleSelectDrone}
+          compassRef={compassRef}
         />
       </Canvas>
 
-      {/* HUD overlay */}
-      <div className="absolute top-4 left-4 flex items-center gap-3">
-        <div className="flex items-center gap-2 px-3 py-1.5 bg-card/80 backdrop-blur border border-border rounded">
-          <div className="w-2 h-2 rounded-full bg-chart-1 animate-pulse" />
-          <span className="text-xs font-mono text-muted-foreground">LIVE</span>
+      {/* Top-left status bar */}
+      <div className="absolute top-3 left-3 flex items-center gap-2 pointer-events-none select-none">
+        <div className="flex items-center gap-1.5 px-2.5 py-1 bg-black/70 backdrop-blur border border-emerald-500/30 rounded">
+          <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-[11px] font-mono text-emerald-400">LIVE</span>
         </div>
-        <div className="px-3 py-1.5 bg-card/80 backdrop-blur border border-border rounded">
-          <span className="text-xs font-mono text-muted-foreground">
-            GRID: 100x100 | DRONES: {drones.length} | VICTIMS: {victims.filter(v => !v.rescued).length}
-          </span>
+        <div className="flex items-center gap-3 px-3 py-1 bg-black/70 backdrop-blur border border-blue-500/20 rounded text-[11px] font-mono text-blue-300/80">
+          <span>GRID <span className="text-white/40">50x50m</span></span>
+          <span className="text-white/20">|</span>
+          <span>DRONES <span className="text-blue-300">{drones.length}</span></span>
+          <span className="text-white/20">|</span>
+          <span>SEARCHING <span className="text-blue-300">{searchingCount}</span></span>
+          <span className="text-white/20">|</span>
+          <span>TRACKING <span className={trackingCount > 0 ? "text-red-400" : "text-blue-300"}>{trackingCount}</span></span>
+          <span className="text-white/20">|</span>
+          <span>ALERTS <span className={activeAlerts > 0 ? "text-red-400 animate-pulse" : "text-blue-300"}>{activeAlerts}</span></span>
+          <span className="text-white/20">|</span>
+          <span>RESCUED <span className="text-emerald-400">{rescuedCount}</span></span>
+        </div>
+      </div>
+
+      {/* Legend */}
+      <div className="absolute top-3 right-3 bg-black/70 backdrop-blur border border-blue-500/20 rounded p-2.5 pointer-events-none select-none space-y-0.5">
+        <div className="text-[9px] font-mono text-white/30 tracking-widest pb-1">DRONE STATUS</div>
+        {[
+          { color: "#3b82f6", label: "SEARCHING" },
+          { color: "#ef4444", label: "TRACKING" },
+          { color: "#f59e0b", label: "RECALLING" },
+          { color: "#10b981", label: "CHARGING" },
+          { color: "#4b5563", label: "IDLE" },
+        ].map(({ color, label }) => (
+          <div key={label} className="flex items-center gap-2 py-0.5">
+            <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }} />
+            <span className="text-[10px] font-mono text-slate-400">{label}</span>
+          </div>
+        ))}
+        <div className="pt-1.5 border-t border-white/10">
+          <div className="text-[9px] font-mono text-white/30 tracking-widest pb-1">VICTIMS</div>
+          {[
+            { color: "#ef4444", label: "DETECTED" },
+            { color: "#f59e0b", label: "RESCUE OTW" },
+            { color: "#22c55e", label: "RESCUED" },
+          ].map(({ color, label }) => (
+            <div key={label} className="flex items-center gap-2 py-0.5">
+              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }} />
+              <span className="text-[10px] font-mono text-slate-400">{label}</span>
+            </div>
+          ))}
+        </div>
+        <div className="pt-1.5 border-t border-white/10">
+          <div className="text-[9px] font-mono text-white/30 tracking-widest pb-0.5">COVERAGE</div>
+          <div className="flex items-center gap-2 py-0.5">
+            <div className="w-2 h-2 rounded shrink-0 opacity-20 bg-blue-400" />
+            <span className="text-[10px] font-mono text-slate-400">UNSCANNED</span>
+          </div>
+          <div className="flex items-center gap-2 py-0.5">
+            <div className="w-2 h-2 rounded shrink-0" style={{ backgroundColor: "#3b82f6", boxShadow: "0 0 4px #3b82f6" }} />
+            <span className="text-[10px] font-mono text-slate-400">SCANNED</span>
+          </div>
         </div>
       </div>
 
       {/* Compass */}
-      <div className="absolute bottom-4 right-4 w-16 h-16 rounded-full border border-border bg-card/80 backdrop-blur flex items-center justify-center">
-        <div className="relative w-12 h-12">
-          <div className="absolute top-0 left-1/2 -translate-x-1/2 text-xs font-mono text-chart-1">N</div>
-          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-xs font-mono text-muted-foreground">S</div>
-          <div className="absolute left-0 top-1/2 -translate-y-1/2 text-xs font-mono text-muted-foreground">W</div>
-          <div className="absolute right-0 top-1/2 -translate-y-1/2 text-xs font-mono text-muted-foreground">E</div>
+      <div className="absolute bottom-4 right-4 w-16 h-16 rounded-full bg-black/70 backdrop-blur border border-blue-500/25 flex items-center justify-center pointer-events-none select-none overflow-hidden">
+        <div ref={compassRef} className="relative w-12 h-12 transition-none">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 text-[10px] font-mono text-blue-400 font-bold leading-none">N</div>
+          <div className="absolute bottom-0 left-1/2 -translate-x-1/2 text-[9px] font-mono text-slate-600 leading-none">S</div>
+          <div className="absolute left-0 top-1/2 -translate-y-1/2 text-[9px] font-mono text-slate-600 leading-none">W</div>
+          <div className="absolute right-0 top-1/2 -translate-y-1/2 text-[9px] font-mono text-slate-600 leading-none">E</div>
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-full w-0.5 h-4 bg-blue-400 origin-bottom rounded-full" />
+          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 h-2.5 w-0.5 bg-slate-600 origin-top rounded-full" />
         </div>
+      </div>
+
+      {/* Area label */}
+      <div className="absolute bottom-4 left-4 px-3 py-1.5 bg-black/70 backdrop-blur border border-blue-500/20 rounded pointer-events-none select-none">
+        <span className="text-[10px] font-mono text-slate-500">AREA 7 - DISASTER ZONE - 50x50m</span>
       </div>
     </div>
   )

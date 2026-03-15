@@ -14,8 +14,10 @@ export default function DashboardHeader({
   connectionStatus: ConnectionStatus
 }) {
   const [currentTime, setCurrentTime] = useState(new Date())
+  const [hasMounted, setHasMounted] = useState(false)
 
   useEffect(() => {
+    setHasMounted(true)
     const interval = setInterval(() => {
       setCurrentTime(new Date())
     }, 1000)
@@ -96,16 +98,16 @@ export default function DashboardHeader({
         {/* Date & Time */}
         <div className="flex items-center gap-2">
           <Clock className="w-4 h-4 text-muted-foreground" />
-          <div className="text-right">
+          <div className="text-right min-w-[80px]"> 
             <div className="font-mono text-xs text-foreground">
-              {formatTime(currentTime)}
+              {hasMounted ? formatTime(currentTime) : "--:--:--"}
             </div>
             <div className="font-mono text-xs text-muted-foreground">
-              {formatDate(currentTime)}
+              {hasMounted ? formatDate(currentTime) : "Loading..."}
             </div>
           </div>
         </div>
-      </div>
+      </div> {/* Closed the Right-side container */}
     </header>
   )
 }
