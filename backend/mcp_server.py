@@ -9,12 +9,9 @@ import json
 import logging
 import math
 import random
-from typing import Dict, List, Optional, Any, Set, Tuple
+from typing import Dict, Any, Set
 
-from mcp.server import Server
-from mcp.server.stdio import stdio_server
-from mcp.types import Tool, TextContent
-from pydantic import AnyUrl
+import fastmcp
 
 # Import existing drone components
 from drone import Drone
@@ -23,6 +20,9 @@ from drone_manager import DroneManager, GridCell
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Create FastMCP server
+mcp = fastmcp.FastMCP("aegis-drone-command")
 
 # Global instances
 drone_manager: DroneManager = None
@@ -96,165 +96,8 @@ def unregister_websocket_connection(connection: Any) -> None:
     active_connections.discard(connection)
 
 
-# Create MCP Server
-app = Server("aegis-drone-command")
-
-
-@app.list_tools()
-async def list_tools() -> List[Tool]:
-    """List all available tools for the AI Agent."""
-    return [
-        Tool(
-            name="discover_drones",
-            description="Return a list of all active drone IDs with basic vitals (ID, status, battery).",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        Tool(
-            name="get_fleet_status",
-            description="Provide full telemetry for the entire fleet including location, battery, status, and current task.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        Tool(
-            name="move_drone",
-            description="Move a drone to a specific position. Validates battery before execution.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "drone_id": {
-                        "type": "string",
-                        "description": "The ID of the drone to move (e.g., 'DRONE-01')"
-                    },
-                    "x": {
-                        "type": "number",
-                        "description": "Target X coordinate (0-50)"
-                    },
-                    "y": {
-                        "type": "number",
-                        "description": "Target Y/altitude coordinate (2-20)"
-                    }
-                },
-                "required": ["drone_id", "x", "y"]
-            }
-        ),
-        Tool(
-            name="start_thermal_scan",
-            description="Initiate a thermal scan from the drone's current position. Returns simulated heat signatures with confidence scores.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "drone_id": {
-                        "type": "string",
-                        "description": "The ID of the drone to perform the scan"
-                    }
-                },
-                "required": ["drone_id"]
-            }
-        ),
-        Tool(
-            name="verify_target",
-            description="Execute a high-accuracy verification scan at a specific location to confirm a survivor. Returns detailed victim data.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "drone_id": {
-                        "type": "string",
-                        "description": "The ID of the drone performing verification"
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "description": "The victim/target ID to verify (e.g., 'VICTIM-001')"
-                    }
-                },
-                "required": ["drone_id", "target_id"]
-            }
-        ),
-        Tool(
-            name="evaluate_fleet_for_task",
-            description="Helper tool that evaluates all drones and returns the most suitable one for a task based on battery level and distance to target.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "task_x": {
-                        "type": "number",
-                        "description": "X coordinate of the task location"
-                    },
-                    "task_y": {
-                        "type": "number",
-                        "description": "Z coordinate of the task location (named task_y for 2D grid)"
-                    }
-                },
-                "required": ["task_x", "task_y"]
-            }
-        ),
-        Tool(
-            name="get_world_state",
-            description="Return a global view of the 2D disaster zone grid including exploration percentage and known target/victim locations.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        ),
-        Tool(
-            name="return_to_base",
-            description="Command a drone to return to the charging base at (0,0) and set status to recharging.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "drone_id": {
-                        "type": "string",
-                        "description": "The ID of the drone to recall"
-                    }
-                },
-                "required": ["drone_id"]
-            }
-        ),
-    ]
-
-
-@app.call_tool()
-async def call_tool(name: str, arguments: Any) -> List[TextContent]:
-    """Handle tool calls from the AI Agent."""
-
-    if name == "discover_drones":
-        return await discover_drones()
-    elif name == "get_fleet_status":
-        return await get_fleet_status()
-    elif name == "move_drone":
-        return await move_drone(
-            arguments["drone_id"],
-            arguments["x"],
-            arguments["y"]
-        )
-    elif name == "start_thermal_scan":
-        return await start_thermal_scan(arguments["drone_id"])
-    elif name == "verify_target":
-        return await verify_target(
-            arguments["drone_id"],
-            arguments["target_id"]
-        )
-    elif name == "evaluate_fleet_for_task":
-        return await evaluate_fleet_for_task(
-            arguments["task_x"],
-            arguments["task_y"]
-        )
-    elif name == "get_world_state":
-        return await get_world_state()
-    elif name == "return_to_base":
-        return await return_to_base(arguments["drone_id"])
-    else:
-        return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-
-async def discover_drones() -> List[TextContent]:
+@mcp.tool()
+async def discover_drones() -> str:
     """
     Return a list of all active drone IDs and basic vitals.
 
@@ -281,10 +124,11 @@ async def discover_drones() -> List[TextContent]:
         ]
     }
 
-    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    return json.dumps(result, indent=2)
 
 
-async def get_fleet_status() -> List[TextContent]:
+@mcp.tool()
+async def get_fleet_status() -> str:
     """
     Provide full telemetry for the entire fleet.
 
@@ -318,38 +162,31 @@ async def get_fleet_status() -> List[TextContent]:
         }
     }
 
-    return [TextContent(type="text", text=json.dumps(result, indent=2))]
+    return json.dumps(result, indent=2)
 
 
-async def move_drone(drone_id: str, x: float, y: float) -> List[TextContent]:
+@mcp.tool()
+async def move_drone(drone_id: str, x: float, y: float) -> str:
     """
     Move a drone to a specific position.
 
     Validates that the drone has sufficient battery for the journey.
     Sets status to 'moving' during transit.
-
-    Args:
-        drone_id: The ID of the drone to move
-        x: Target X coordinate (0-50)
-        y: Target Z coordinate (use 'y' param name but it's the Z/vertical axis in 2D)
-
-    Returns:
-        Success/failure message with distance and battery info
     """
     drone = drone_manager.get_drone(drone_id)
 
     if not drone:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": f"Drone {drone_id} not found",
             "available_drones": list(drone_manager.get_all_drones().keys())
-        }, indent=2))]
+        }, indent=2)
 
     # Validate coordinates
     if not (0 <= x <= 50 and 0 <= y <= 50):
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": "Coordinates out of bounds",
             "valid_range": "0-50 for both x and y"
-        }, indent=2))]
+        }, indent=2)
 
     # Calculate distance
     current_x, _, current_z = drone.position
@@ -362,13 +199,13 @@ async def move_drone(drone_id: str, x: float, y: float) -> List[TextContent]:
         # Initiate return to base instead
         drone.status = "RECALLING"
         await broadcast_drone_state()
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": "Insufficient battery for movement",
             "drone_id": drone_id,
             "current_battery": round(drone.battery, 1),
             "battery_needed": round(battery_needed + 10, 1),
             "action": "Drone recalled to base for recharging"
-        }, indent=2))]
+        }, indent=2)
 
     # Move the drone
     drone.position = [x, 5, y]  # Maintain altitude at 5
@@ -379,7 +216,7 @@ async def move_drone(drone_id: str, x: float, y: float) -> List[TextContent]:
 
     await broadcast_drone_state()
 
-    return [TextContent(type="text", text=json.dumps({
+    return json.dumps({
         "success": True,
         "drone_id": drone_id,
         "new_position": {
@@ -391,25 +228,23 @@ async def move_drone(drone_id: str, x: float, y: float) -> List[TextContent]:
         "battery_consumed": round(battery_needed, 1),
         "remaining_battery": round(drone.battery, 1),
         "status": "MOVING"
-    }, indent=2))]
+    }, indent=2)
 
 
-async def start_thermal_scan(drone_id: str) -> List[TextContent]:
+@mcp.tool()
+async def start_thermal_scan(drone_id: str) -> str:
     """
     Set drone status to scanning and return simulated heat signatures.
 
     This tool simulates a thermal scan from the drone's current position,
     detecting heat signatures in the surrounding area with confidence scores.
-
-    Returns:
-        List of detected heat signatures with locations and confidence levels
     """
     drone = drone_manager.get_drone(drone_id)
 
     if not drone:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": f"Drone {drone_id} not found"
-        }, indent=2))]
+        }, indent=2)
 
     # Set status to scanning
     drone.status = "SCANNING"
@@ -445,7 +280,7 @@ async def start_thermal_scan(drone_id: str) -> List[TextContent]:
     # Sort by confidence
     detections.sort(key=lambda d: d["confidence"], reverse=True)
 
-    return [TextContent(type="text", text=json.dumps({
+    return json.dumps({
         "success": True,
         "drone_id": drone_id,
         "scan_position": {
@@ -454,36 +289,30 @@ async def start_thermal_scan(drone_id: str) -> List[TextContent]:
         },
         "detections": detections,
         "total_found": len(detections)
-    }, indent=2))]
+    }, indent=2)
 
 
-async def verify_target(drone_id: str, target_id: str) -> List[TextContent]:
+@mcp.tool()
+async def verify_target(drone_id: str, target_id: str) -> str:
     """
     Execute a high-accuracy verification scan at a specific location.
 
     This confirms a survivor's presence with detailed thermal data.
     Returns verified victim information if confirmed.
-
-    Args:
-        drone_id: The ID of the drone performing verification
-        target_id: The victim/target ID to verify (e.g., 'VICTIM-001')
-
-    Returns:
-        Verification result with detailed victim data
     """
     drone = drone_manager.get_drone(drone_id)
 
     if not drone:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": f"Drone {drone_id} not found"
-        }, indent=2))]
+        }, indent=2)
 
     # Check if target exists
     if target_id not in SIMULATED_VICTIMS:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": f"Target {target_id} not found",
             "available_targets": list(SIMULATED_VICTIMS.keys())
-        }, indent=2))]
+        }, indent=2)
 
     victim_data = SIMULATED_VICTIMS[target_id]
 
@@ -521,10 +350,11 @@ async def verify_target(drone_id: str, target_id: str) -> List[TextContent]:
         "status": "TRACKING"
     }
 
-    return [TextContent(type="text", text=json.dumps(verification, indent=2))]
+    return json.dumps(verification, indent=2)
 
 
-async def evaluate_fleet_for_task(task_x: float, task_y: float) -> List[TextContent]:
+@mcp.tool()
+async def evaluate_fleet_for_task(task_x: float, task_y: float) -> str:
     """
     Evaluate all drones and recommend the most suitable one for a task.
 
@@ -532,8 +362,6 @@ async def evaluate_fleet_for_task(task_x: float, task_y: float) -> List[TextCont
     - Distance from each drone to the target
     - Battery feasibility (with safety margin)
     - Current availability
-
-    Returns the best drone ID with reasoning.
     """
     drones = drone_manager.get_all_drones()
 
@@ -573,26 +401,27 @@ async def evaluate_fleet_for_task(task_x: float, task_y: float) -> List[TextCont
             })
 
     if not candidates:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": "No available drones for task",
             "reason": "All drones are either busy, low battery, or too far",
             "task_location": {"x": task_x, "y": task_y}
-        }, indent=2))]
+        }, indent=2)
 
     # Sort by total score
     candidates.sort(key=lambda c: c["total_score"], reverse=True)
     best = candidates[0]
 
-    return [TextContent(type="text", text=json.dumps({
+    return json.dumps({
         "recommended_drone": best["drone_id"],
         "task_location": {"x": task_x, "y": task_y},
         "reasoning": f"Best balance of battery ({best['current_battery']}%) and distance ({best['distance']} units)",
         "evaluation": candidates[:3],  # Top 3 candidates
         "all_candidates": len(candidates)
-    }, indent=2))]
+    }, indent=2)
 
 
-async def get_world_state() -> List[TextContent]:
+@mcp.tool()
+async def get_world_state() -> str:
     """
     Return a global view of the 2D disaster zone grid.
 
@@ -630,7 +459,7 @@ async def get_world_state() -> List[TextContent]:
                 "battery": round(drone.battery, 1)
             })
 
-    return [TextContent(type="text", text=json.dumps({
+    return json.dumps({
         "grid": {
             "size": drone_manager.GRID_SIZE,
             "cell_size": drone_manager.CELL_SIZE,
@@ -641,10 +470,11 @@ async def get_world_state() -> List[TextContent]:
         "victims": victims,
         "sectors": sectors,
         "charging_base": {"x": 0, "z": 0}
-    }, indent=2))]
+    }, indent=2)
 
 
-async def return_to_base(drone_id: str) -> List[TextContent]:
+@mcp.tool()
+async def return_to_base(drone_id: str) -> str:
     """
     Command a drone to return to the charging base at (0,0).
 
@@ -654,10 +484,10 @@ async def return_to_base(drone_id: str) -> List[TextContent]:
     drone = drone_manager.get_drone(drone_id)
 
     if not drone:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": f"Drone {drone_id} not found",
             "available_drones": list(drone_manager.get_all_drones().keys())
-        }, indent=2))]
+        }, indent=2)
 
     # Calculate distance to base
     current_x, _, current_z = drone.position
@@ -667,12 +497,12 @@ async def return_to_base(drone_id: str) -> List[TextContent]:
     battery_needed = distance_to_base * 0.5
 
     if drone.battery < battery_needed + 5:
-        return [TextContent(type="text", text=json.dumps({
+        return json.dumps({
             "error": "Insufficient battery to return to base",
             "drone_id": drone_id,
             "current_battery": round(drone.battery, 1),
             "battery_needed": round(battery_needed + 5, 1)
-        }, indent=2))]
+        }, indent=2)
 
     # Update drone state
     drone.position = [0, 2, 0]  # Lower altitude for charging
@@ -682,7 +512,7 @@ async def return_to_base(drone_id: str) -> List[TextContent]:
 
     await broadcast_drone_state()
 
-    return [TextContent(type="text", text=json.dumps({
+    return json.dumps({
         "success": True,
         "drone_id": drone_id,
         "action": "Returning to base",
@@ -690,7 +520,7 @@ async def return_to_base(drone_id: str) -> List[TextContent]:
         "status": "CHARGING",
         "distance_traveled": round(distance_to_base, 2),
         "remaining_battery": round(drone.battery, 1)
-    }, indent=2))]
+    }, indent=2)
 
 
 async def main():
@@ -704,12 +534,7 @@ async def main():
     logger.info("Available tools: discover_drones, get_fleet_status, move_drone, start_thermal_scan, verify_target, evaluate_fleet_for_task, get_world_state, return_to_base")
 
     # Run the server
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(
-            read_stream,
-            write_stream,
-            app.create_initialization_options()
-        )
+    await mcp.run_stdio()
 
 
 if __name__ == "__main__":

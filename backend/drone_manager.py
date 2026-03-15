@@ -220,6 +220,64 @@ class DroneManager:
             "visited_percentage": self.get_visited_percentage(),
         }
 
+    def get_world_summary(self) -> Dict[str, Any]:
+        """Get a comprehensive world state summary for the agent."""
+        grid_summary = self.get_grid_summary()
+
+        # Get known victims
+        victims = []
+        for cell in self.grid_map.values():
+            if cell.has_victim:
+                victims.append({
+                    "victim_id": cell.victim_id,
+                    "position": {
+                        "x": cell.x * self.CELL_SIZE + self.CELL_SIZE / 2,
+                        "z": cell.z * self.CELL_SIZE + self.CELL_SIZE / 2
+                    },
+                    "danger_level": cell.danger_level
+                })
+
+        # Get sector assignments
+        sectors = {}
+        for drone_id, drone in self.drones.items():
+            if drone.assigned_sector:
+                if drone.assigned_sector not in sectors:
+                    sectors[drone.assigned_sector] = []
+                sectors[drone.assigned_sector].append({
+                    "drone_id": drone_id,
+                    "status": drone.status,
+                    "battery": round(drone.battery, 1),
+                    "position": {
+                        "x": round(drone.position[0], 1),
+                        "z": round(drone.position[2], 1)
+                    }
+                })
+
+        return {
+            "grid": {
+                "size": self.GRID_SIZE,
+                "cell_size": self.CELL_SIZE,
+                "explored_percent": round(grid_summary["visited_percentage"], 1)
+            },
+            "victims": victims,
+            "sectors": sectors,
+            "charging_base": {"x": 0, "z": 0},
+            "drones": {
+                drone_id: {
+                    "id": drone.id,
+                    "status": drone.status,
+                    "battery": round(drone.battery, 1),
+                    "position": {
+                        "x": round(drone.position[0], 1),
+                        "y": round(drone.position[1], 1),
+                        "z": round(drone.position[2], 1)
+                    },
+                    "assigned_sector": drone.assigned_sector
+                }
+                for drone_id, drone in self.drones.items()
+            }
+        }
+
     def assign_sector(self, drone_id: str, sector: str) -> bool:
         """Assign a drone to a sector."""
         drone = self.get_drone(drone_id)
