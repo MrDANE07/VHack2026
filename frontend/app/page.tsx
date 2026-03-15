@@ -66,7 +66,23 @@ export default function DashboardPage() {
   const [alerts, setAlerts] = useState<VictimAlert[]>([])
   const [selectedDrone, setSelectedDrone] = useState<string | null>(null)
   const [missionStarted, setMissionStarted] = useState(false)
-  const [connectionStatus] = useState({ websocket: true, lastPing: new Date() })
+  const [wsConnected, setWsConnected] = useState(false)
+  const [connectionStatus, setConnectionStatus] = useState({ websocket: false, lastPing: new Date() })
+
+  // WebSocket ref
+  const wsRef = useRef<WebSocket | null>(null)
+  const pressedKeysRef = useRef<Set<string>>(new Set())
+
+  // Wrapper for setSelectedDrone that also notifies backend
+  const handleSelectDrone = useCallback((droneId: string | null) => {
+    setSelectedDrone(droneId)
+    if (droneId && wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "select_drone",
+        droneId: droneId,
+      }))
+    }
+  }, [])
   
   const logIdRef = useRef(0)
   const alertIdRef = useRef(0)
@@ -158,6 +174,122 @@ export default function DashboardPage() {
     bootSequence()
   }, [addLog, missionStarted])
 
+  // WebSocket connection
+  useEffect(() => {
+    const connectWebSocket = () => {
+      const ws = new WebSocket("ws://localhost:8000/ws/drone-control")
+
+      ws.onopen = () => {
+        console.log("WebSocket connected")
+        setWsConnected(true)
+        setConnectionStatus({ websocket: true, lastPing: new Date() })
+      }
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data)
+          if (message.type === "drone_update" || message.type === "initial_state") {
+            // Update drones from backend state
+            const backendDrones = message.drones
+            setDrones(prev => prev.map(drone => {
+              const backendDrone = backendDrones[drone.id]
+              if (backendDrone) {
+                return {
+                  ...drone,
+                  position: backendDrone.position as [number, number, number],
+                  status: backendDrone.status as DroneStatus["status"],
+                  battery: backendDrone.battery,
+                  assignedSector: backendDrone.assignedSector,
+                  trackingVictimId: backendDrone.trackingVictimId,
+                  manualMode: backendDrone.manualMode,
+                }
+              }
+              return drone
+            }))
+          }
+        } catch (e) {
+          console.error("Error parsing WebSocket message:", e)
+        }
+      }
+
+      ws.onclose = () => {
+        console.log("WebSocket disconnected")
+        setWsConnected(false)
+        setConnectionStatus({ websocket: false, lastPing: new Date() })
+        // Reconnect after 2 seconds
+        setTimeout(connectWebSocket, 2000)
+      }
+
+      ws.onerror = (error) => {
+        console.error("WebSocket error:", error)
+      }
+
+      wsRef.current = ws
+    }
+
+    connectWebSocket()
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+  // Guard: Ensure we have a socket and a drone selected
+  if (!wsRef.current || !selectedDrone) return;
+
+  const validKeys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "W", "s", "S", "a", "A", "d", "D"];
+
+  const handleKeyDown = (e: KeyboardEvent) => {
+    if (!validKeys.includes(e.key)) return;
+
+    // Prevent scrolling for arrow keys
+    if (e.key.startsWith("Arrow")) e.preventDefault();
+
+    const isSocketReady = wsRef.current?.readyState === WebSocket.OPEN;
+
+    if (isSocketReady && !pressedKeysRef.current.has(e.key)) {
+      pressedKeysRef.current.add(e.key);
+      wsRef.current?.send(JSON.stringify({
+        type: "keydown",
+        key: e.key,
+        droneId: selectedDrone,
+      }));
+    }
+  };
+
+  const handleKeyUp = (e: KeyboardEvent) => {
+    if (!validKeys.includes(e.key)) return;
+
+    const isSocketReady = wsRef.current?.readyState === WebSocket.OPEN;
+
+    // Only send if the key was actually tracked and socket is live
+    if (pressedKeysRef.current.has(e.key)) {
+      pressedKeysRef.current.delete(e.key);
+      
+      if (isSocketReady) {
+        wsRef.current?.send(JSON.stringify({
+          type: "keyup",
+          key: e.key,
+          droneId: selectedDrone,
+        }));
+      }
+    }
+  };
+
+  window.addEventListener("keydown", handleKeyDown);
+  window.addEventListener("keyup", handleKeyUp);
+
+  return () => {
+    window.removeEventListener("keydown", handleKeyDown);
+    window.removeEventListener("keyup", handleKeyUp);
+    // Important: Clear tracking so keys don't "stick" if the effect re-runs
+    pressedKeysRef.current.clear();
+  };
+}, [selectedDrone]); // Effect re-syncs when drone target changes
+
   // Main simulation loop - drone movement and battery management
   useEffect(() => {
     if (!missionStarted) return
@@ -165,8 +297,13 @@ export default function DashboardPage() {
     const interval = setInterval(() => {
       setDrones(prev => {
         const updated = prev.map(drone => {
+          // Skip manual drones - backend handles their movement
+          if (drone.status === "MANUAL" || drone.manualMode) {
+            return { ...drone, lastSeen: new Date() }
+          }
+
           let newDrone = { ...drone, lastSeen: new Date() }
-          
+
           // CHARGING: Increase battery at base
           if (drone.status === "CHARGING") {
             newDrone.battery = Math.min(100, drone.battery + 0.5)
@@ -511,7 +648,7 @@ export default function DashboardPage() {
             drones={simulationDrones}
             victims={simulationVictims}
             selectedDrone={selectedDrone}
-            onSelectDrone={setSelectedDrone}
+            onSelectDrone={handleSelectDrone}
           />
 
           {/* Victim Alerts Overlay (bottom left) */}
@@ -531,7 +668,7 @@ export default function DashboardPage() {
           <FleetStatus
             drones={drones}
             selectedDrone={selectedDrone}
-            onSelectDrone={setSelectedDrone}
+            onSelectDrone={handleSelectDrone}
           />
         </aside>
       </div>

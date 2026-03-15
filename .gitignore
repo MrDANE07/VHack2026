@@ -5,3 +5,7 @@ dist/
 .DS_Store
 
 CLAUDE.md
+.claude/
+
+.venv/
+__pycache__/

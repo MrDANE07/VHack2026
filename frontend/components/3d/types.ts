@@ -3,10 +3,11 @@
 export interface DroneData {
   id: string
   position: [number, number, number]
-  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING"
+  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "MANUAL"
   battery: number
   target?: [number, number, number]
   searchPattern: [number, number, number][]
+  manualMode?: boolean
 }
 
 export interface VictimData {
@@ -24,6 +25,7 @@ export const STATUS_COLORS: Record<string, string> = {
   RECALLING: "#f59e0b",
   IDLE:      "#4b5563",
   CHARGING:  "#10b981",
+  MANUAL:    "#a855f7",
 }
 
 export const SECTOR_DEFS = [
