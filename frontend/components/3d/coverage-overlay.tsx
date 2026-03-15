@@ -55,7 +55,7 @@ export const CoverageOverlay = memo(function CoverageOverlay({
     for (const drone of drones) {
       if (drone.status !== "SEARCHING") continue
       const [dx, , dz] = drone.position
-      const R = 5.5
+      const R = 4
       const minCX = Math.max(0, Math.floor((dx - R) / CELL_SIZE))
       const maxCX = Math.min(COVERAGE_CELLS - 1, Math.ceil((dx + R) / CELL_SIZE) - 1)
       const minCZ = Math.max(0, Math.floor((dz - R) / CELL_SIZE))

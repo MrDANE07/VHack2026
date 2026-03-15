@@ -15,7 +15,7 @@ import { VictimMarker } from "./3d/victim-marker"
 interface DroneData {
   id: string
   position: [number, number, number]
-  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "MANUAL"
+  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING" | "MANUAL"
   battery: number
   target?: [number, number, number]
   searchPattern: [number, number, number][]
@@ -166,6 +166,7 @@ export default function DroneSimulation({
           { color: "#ef4444", label: "TRACKING" },
           { color: "#f59e0b", label: "RECALLING" },
           { color: "#10b981", label: "CHARGING" },
+          { color: "#06b6d4", label: "DEPLOYING" },
           { color: "#4b5563", label: "IDLE" },
           { color: "#a855f7", label: "MANUAL" },
         ].map(({ color, label }) => (

@@ -6,6 +6,7 @@ import DashboardHeader from "@/components/dashboard-header"
 import MissionLog, { LogEntry } from "@/components/mission-log"
 import FleetStatus, { DroneStatus } from "@/components/fleet-status"
 import VictimAlerts, { VictimAlert } from "@/components/victim-alerts"
+import SetupWizard, { type SetupConfig } from "@/components/setup-wizard"
 
 // Dynamic import for 3D scene (no SSR)
 const DroneSimulation = dynamic(() => import("@/components/drone-simulation"), {
@@ -31,6 +32,7 @@ const SECTORS = {
 const CHARGING_BASE: [number, number, number] = [0, 2, 0]
 const LOW_BATTERY_THRESHOLD = 20
 const CRITICAL_BATTERY_THRESHOLD = 15
+const SECTOR_ASSIGN_THRESHOLD = 40
 
 export interface VictimData {
   id: string
@@ -41,27 +43,29 @@ export interface VictimData {
   rescueDispatchedAt?: number
 }
 
-// Initial drone fleet at charging base
-const createInitialDrones = (): DroneStatus[] => [
-  { id: "DRONE-01", position: [...CHARGING_BASE], status: "IDLE", battery: 95, connected: true, lastSeen: new Date(), assignedSector: null },
-  { id: "DRONE-02", position: [...CHARGING_BASE], status: "IDLE", battery: 88, connected: true, lastSeen: new Date(), assignedSector: null },
-  { id: "DRONE-03", position: [...CHARGING_BASE], status: "IDLE", battery: 72, connected: true, lastSeen: new Date(), assignedSector: null },
-  { id: "DRONE-04", position: [...CHARGING_BASE], status: "IDLE", battery: 65, connected: true, lastSeen: new Date(), assignedSector: null },
-  { id: "DRONE-05", position: [...CHARGING_BASE], status: "CHARGING", battery: 30, connected: true, lastSeen: new Date(), assignedSector: null },
-  { id: "DRONE-06", position: [...CHARGING_BASE], status: "CHARGING", battery: 15, connected: true, lastSeen: new Date(), assignedSector: null },
-]
+export default function Page() {
+  const [setupConfig, setSetupConfig] = useState<SetupConfig | null>(null)
+  if (!setupConfig) return <SetupWizard onComplete={setSetupConfig} />
+  return <Dashboard config={setupConfig} />
+}
 
-// Hidden victims to be discovered by thermal scan
-const createHiddenVictims = (): VictimData[] => [
-  { id: "VIC-001", position: [18, 0, 12], status: "HIDDEN" },
-  { id: "VIC-002", position: [40, 0, 8], status: "HIDDEN" },
-  { id: "VIC-003", position: [8, 0, 38], status: "HIDDEN" },
-  { id: "VIC-004", position: [42, 0, 42], status: "HIDDEN" },
-]
-
-export default function DashboardPage() {
-  const [drones, setDrones] = useState<DroneStatus[]>(createInitialDrones)
-  const [victims, setVictims] = useState<VictimData[]>(createHiddenVictims)
+function Dashboard({ config }: { config: SetupConfig }) {
+  const [drones, setDrones] = useState<DroneStatus[]>(() =>
+    config.drones.map(d => ({
+      id: d.id,
+      position: [...CHARGING_BASE] as [number, number, number],
+      status: (d.online
+        ? d.battery < SECTOR_ASSIGN_THRESHOLD ? "CHARGING" as const : "IDLE" as const
+        : "IDLE" as const),
+      battery: d.battery,
+      connected: d.online,
+      lastSeen: new Date(),
+      assignedSector: null,
+    }))
+  )
+  const [victims, setVictims] = useState<VictimData[]>(() =>
+    config.victims.map(v => ({ id: v.id, position: v.position, status: "HIDDEN" as const }))
+  )
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [alerts, setAlerts] = useState<VictimAlert[]>([])
   const [selectedDrone, setSelectedDrone] = useState<string | null>(null)
@@ -86,6 +90,9 @@ export default function DashboardPage() {
   
   const logIdRef = useRef(0)
   const alertIdRef = useRef(0)
+  const sectorAssignments = useRef<{ droneId: string; sector: string }[]>([])
+  const dronesRef = useRef(drones)
+  useEffect(() => { dronesRef.current = drones }, [drones])
 
   // Add log entry
   const addLog = useCallback((type: LogEntry["type"], message: string, droneId?: string) => {
@@ -127,10 +134,11 @@ export default function DashboardPage() {
     return candidates[0] || null
   }, [])
 
-  // Initialize mission on mount
   useEffect(() => {
     if (missionStarted) return
-    
+
+    const sectorKeys = ["A", "B", "C", "D"]
+
     const bootSequence = async () => {
       addLog("SYSTEM", "AEGIS SWARM Mission Control initialized.")
       await delay(500)
@@ -138,49 +146,91 @@ export default function DashboardPage() {
       await delay(800)
       addLog("SUCCESS", "MCP connection established. Discovering drone tools...")
       await delay(600)
-      addLog("SYSTEM", "6 drones registered. Tools: move_to(), thermal_scan(), return_home(), get_status()")
+
+      const onlineCount = config.drones.filter(d => d.online).length
+      addLog("SYSTEM", `${onlineCount} drones registered via MCP discovery. Tools: move_to(), thermal_scan(), return_home(), get_status()`)
       await delay(1000)
       addLog("SYSTEM", "Mission instruction received: SEARCH AREA 7 FOR SURVIVORS")
       await delay(800)
-      
-      // Command agent reasoning
+
       addLog("REASONING", "Analyzing mission parameters...", "COMMAND")
       await delay(600)
       addLog("REASONING", "Area 7 divided into 4 sectors (A, B, C, D). Assessing drone battery levels for dispatch.", "COMMAND")
       await delay(800)
-      addLog("REASONING", "DRONE-05 (30%) and DRONE-06 (15%) have insufficient battery. Keeping at charging base.", "COMMAND")
-      await delay(600)
-      addLog("REASONING", "Optimal dispatch: DRONE-01(95%) -> Sector A, DRONE-02(88%) -> Sector B, DRONE-03(72%) -> Sector C, DRONE-04(65%) -> Sector D", "COMMAND")
-      
-      await delay(1000)
-      
-      // Dispatch drones
-      setDrones(prev => prev.map(drone => {
-        if (drone.id === "DRONE-01") return { ...drone, status: "SEARCHING" as const, assignedSector: "A", position: SECTORS.A.center }
-        if (drone.id === "DRONE-02") return { ...drone, status: "SEARCHING" as const, assignedSector: "B", position: SECTORS.B.center }
-        if (drone.id === "DRONE-03") return { ...drone, status: "SEARCHING" as const, assignedSector: "C", position: SECTORS.C.center }
-        if (drone.id === "DRONE-04") return { ...drone, status: "SEARCHING" as const, assignedSector: "D", position: SECTORS.D.center }
-        return drone
-      }))
-      
-      addLog("ACTION", "Dispatched to Sector A. Initiating thermal scan.", "DRONE-01")
-      addLog("ACTION", "Dispatched to Sector B. Initiating thermal scan.", "DRONE-02")
-      addLog("ACTION", "Dispatched to Sector C. Initiating thermal scan.", "DRONE-03")
-      addLog("ACTION", "Dispatched to Sector D. Initiating thermal scan.", "DRONE-04")
-      
+
+      const sortedOnline = config.drones.filter(d => d.online).sort((a, b) => b.battery - a.battery)
+
+      const lowBat = sortedOnline.filter(d => d.battery < SECTOR_ASSIGN_THRESHOLD)
+      if (lowBat.length > 0) {
+        addLog("REASONING", `${lowBat.map(d => `${d.id} (${d.battery}%)`).join(", ")} — insufficient battery. Keeping at charging base.`, "COMMAND")
+        await delay(600)
+      }
+
+      const offline = config.drones.filter(d => !d.online)
+      if (offline.length > 0) {
+        addLog("REASONING", `${offline.map(d => d.id).join(", ")} — OFFLINE. Excluded from mission.`, "COMMAND")
+        await delay(600)
+      }
+
+      const dispatchable = sortedOnline.filter(d => d.battery >= SECTOR_ASSIGN_THRESHOLD)
+      const assignments: { droneId: string; sector: string; battery: number }[] = []
+      for (let i = 0; i < dispatchable.length && i < sectorKeys.length; i++) {
+        assignments.push({ droneId: dispatchable[i].id, sector: sectorKeys[i], battery: dispatchable[i].battery })
+      }
+
+      sectorAssignments.current = assignments.map(a => ({ droneId: a.droneId, sector: a.sector }))
+
+      if (assignments.length > 0) {
+        addLog("REASONING", `Optimal dispatch: ${assignments.map(a => `${a.droneId}(${a.battery}%) -> Sector ${a.sector}`).join(", ")}`, "COMMAND")
+        await delay(1000)
+
+        setDrones(prev => prev.map(drone => {
+          const a = assignments.find(x => x.droneId === drone.id)
+          if (a) {
+            return {
+              ...drone,
+              status: "DEPLOYING" as const,
+              assignedSector: a.sector,
+              searchWaypoints: generateLawnmowerWaypoints(a.sector as keyof typeof SECTORS),
+              searchPatternIndex: 0,
+            }
+          }
+          return drone
+        }))
+
+        for (const a of assignments) {
+          addLog("ACTION", `Dispatched to Sector ${a.sector}. Initiating thermal scan.`, a.droneId)
+        }
+      } else {
+        addLog("ALERT", "No drones available for dispatch. All drones are charging or offline.", "COMMAND")
+      }
+
       setMissionStarted(true)
     }
-    
-    bootSequence()
-  }, [addLog, missionStarted])
 
-  // WebSocket connection
+    bootSequence()
+  }, [addLog, missionStarted, config])
+
+  // WebSocket connection (graceful — backend may not be running yet)
   useEffect(() => {
+    let retryDelay = 2000
+    let retryTimer: ReturnType<typeof setTimeout>
+    let disposed = false
+    let hasLoggedFailure = false
+
     const connectWebSocket = () => {
-      const ws = new WebSocket("ws://localhost:8000/ws/drone-control")
+      if (disposed) return
+
+      let ws: WebSocket
+      try {
+        ws = new WebSocket("ws://localhost:8000/ws/drone-control")
+      } catch {
+        return
+      }
 
       ws.onopen = () => {
-        console.log("WebSocket connected")
+        retryDelay = 2000
+        hasLoggedFailure = false
         setWsConnected(true)
         setConnectionStatus({ websocket: true, lastPing: new Date() })
       }
@@ -189,7 +239,6 @@ export default function DashboardPage() {
         try {
           const message = JSON.parse(event.data)
           if (message.type === "drone_update" || message.type === "initial_state") {
-            // Update drones from backend state
             const backendDrones = message.drones
             setDrones(prev => prev.map(drone => {
               const backendDrone = backendDrones[drone.id]
@@ -207,21 +256,26 @@ export default function DashboardPage() {
               return drone
             }))
           }
-        } catch (e) {
-          console.error("Error parsing WebSocket message:", e)
+        } catch {
+          // ignore malformed messages
         }
       }
 
       ws.onclose = () => {
-        console.log("WebSocket disconnected")
         setWsConnected(false)
         setConnectionStatus({ websocket: false, lastPing: new Date() })
-        // Reconnect after 2 seconds
-        setTimeout(connectWebSocket, 2000)
+        if (!disposed) {
+          if (!hasLoggedFailure) {
+            console.info("[AEGIS] Backend WS not available — running in offline simulation mode. Will retry silently.")
+            hasLoggedFailure = true
+          }
+          retryTimer = setTimeout(connectWebSocket, retryDelay)
+          retryDelay = Math.min(retryDelay * 1.5, 30000)
+        }
       }
 
-      ws.onerror = (error) => {
-        console.error("WebSocket error:", error)
+      ws.onerror = () => {
+        // Swallow — onclose fires next and handles retry
       }
 
       wsRef.current = ws
@@ -230,11 +284,20 @@ export default function DashboardPage() {
     connectWebSocket()
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close()
-      }
+      disposed = true
+      clearTimeout(retryTimer)
+      wsRef.current?.close()
     }
   }, [])
+
+  // Send setup config to backend when WebSocket connects
+  useEffect(() => {
+    if (!wsConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(JSON.stringify({
+      type: "sync_config",
+      config: { drones: config.drones, victims: config.victims },
+    }))
+  }, [wsConnected, config])
 
   useEffect(() => {
   // Guard: Ensure we have a socket and a drone selected
@@ -304,12 +367,30 @@ export default function DashboardPage() {
 
           let newDrone = { ...drone, lastSeen: new Date() }
 
-          // CHARGING: Increase battery at base
+          // CHARGING: Increase battery at base, then deploy to an uncovered sector
           if (drone.status === "CHARGING") {
             newDrone.battery = Math.min(100, drone.battery + 0.5)
             if (newDrone.battery >= 100 && drone.battery < 100) {
-              addLog("SUCCESS", "Fully charged. Status: IDLE, awaiting instructions.", drone.id)
+              const coveredSectors = new Set(
+                prev.filter(d => d.id !== drone.id && d.assignedSector &&
+                  (d.status === "SEARCHING" || d.status === "TRACKING" || d.status === "DEPLOYING"))
+                  .map(d => d.assignedSector)
+              )
+              const stored = sectorAssignments.current.find(a => a.droneId === drone.id)
+              const targetSector = stored && !coveredSectors.has(stored.sector)
+                ? stored.sector
+                : (["A", "B", "C", "D"] as const).find(s => !coveredSectors.has(s))
+
+              if (targetSector) {
+                newDrone.status = "DEPLOYING"
+                newDrone.assignedSector = targetSector
+                newDrone.searchWaypoints = generateLawnmowerWaypoints(targetSector as keyof typeof SECTORS)
+                newDrone.searchPatternIndex = 0
+                addLog("SUCCESS", `Fully charged. Deploying to Sector ${targetSector}.`, drone.id)
+                return newDrone
+              }
               newDrone.status = "IDLE"
+              addLog("SUCCESS", "Fully charged. All sectors covered — awaiting instructions.", drone.id)
             }
             newDrone.position = [...CHARGING_BASE]
             return newDrone
@@ -396,17 +477,54 @@ export default function DashboardPage() {
             return newDrone
           }
           
-          // SEARCHING: Move in pattern, drain battery, can detect victims
+          // DEPLOYING: Fly toward first lawnmower waypoint (or sector center as fallback)
+          if (drone.status === "DEPLOYING" && drone.assignedSector) {
+            const waypoints = drone.searchWaypoints ?? []
+            const target = waypoints[0] ?? SECTORS[drone.assignedSector as keyof typeof SECTORS].center
+            const dx = target[0] - drone.position[0]
+            const dz = target[2] - drone.position[2]
+            const dist = Math.sqrt(dx * dx + dz * dz)
+            if (dist < 2) {
+              newDrone.status = "SEARCHING"
+              addLog("ACTION", `Arrived at Sector ${drone.assignedSector}. Initiating search pattern.`, drone.id)
+            } else {
+              const speed = 1.5
+              newDrone.position = [
+                drone.position[0] + (dx / dist) * speed,
+                5,
+                drone.position[2] + (dz / dist) * speed,
+              ]
+            }
+            newDrone.battery = Math.max(0, drone.battery - 0.05)
+            return newDrone
+          }
+
+          // SEARCHING: Follow lawnmower waypoints, drain battery
           if (drone.status === "SEARCHING" && drone.assignedSector) {
-            const sector = SECTORS[drone.assignedSector as keyof typeof SECTORS]
-            
-            // Random movement within sector bounds
-            const newX = Math.max(sector.bounds.minX, Math.min(sector.bounds.maxX, drone.position[0] + (Math.random() - 0.5) * 3))
-            const newZ = Math.max(sector.bounds.minZ, Math.min(sector.bounds.maxZ, drone.position[2] + (Math.random() - 0.5) * 3))
-            
-            newDrone.position = [newX, 5, newZ]
+            const waypoints = drone.searchWaypoints ?? []
+            const idx = drone.searchPatternIndex ?? 0
+
+            if (waypoints.length === 0 || idx >= waypoints.length) {
+              newDrone.searchPatternIndex = 0
+            } else {
+              const target = waypoints[idx]
+              const dx = target[0] - drone.position[0]
+              const dz = target[2] - drone.position[2]
+              const dist = Math.sqrt(dx * dx + dz * dz)
+
+              if (dist < 1.5) {
+                newDrone.searchPatternIndex = idx + 1
+              } else {
+                const speed = 1.2
+                newDrone.position = [
+                  drone.position[0] + (dx / dist) * speed,
+                  5,
+                  drone.position[2] + (dz / dist) * speed,
+                ]
+              }
+            }
             newDrone.battery = Math.max(0, drone.battery - 0.1)
-            
+
             // Check for low battery - RTB needed
             if (newDrone.battery <= LOW_BATTERY_THRESHOLD && drone.battery > LOW_BATTERY_THRESHOLD) {
               const currentSector = drone.assignedSector
@@ -416,18 +534,24 @@ export default function DashboardPage() {
               newDrone.status = "RECALLING"
               newDrone.assignedSector = null
               
-              // Try to find replacement for the sector
               const replacement = prev.find(d => d.status === "IDLE" && d.battery > 50)
               if (replacement && currentSector) {
                 addLog("REASONING", `Sector ${currentSector} needs coverage. Dispatching ${replacement.id} (${replacement.battery.toFixed(0)}% battery).`, "COMMAND")
                 setTimeout(() => {
                   setDrones(d => d.map(dr => {
                     if (dr.id === replacement.id) {
-                      return { ...dr, status: "SEARCHING" as const, assignedSector: currentSector, position: sector.center }
+                      const wp = generateLawnmowerWaypoints(currentSector as keyof typeof SECTORS)
+                      return {
+                        ...dr,
+                        status: "DEPLOYING" as const,
+                        assignedSector: currentSector,
+                        searchWaypoints: wp,
+                        searchPatternIndex: findNearestWaypointIndex(dr.position, wp),
+                      }
                     }
                     return dr
                   }))
-                  addLog("ACTION", `Dispatched to Sector ${currentSector}. Resuming search pattern.`, replacement.id)
+                  addLog("ACTION", `Dispatched to Sector ${currentSector}. Deploying...`, replacement.id)
                 }, 500)
               }
             }
@@ -443,47 +567,43 @@ export default function DashboardPage() {
     return () => clearInterval(interval)
   }, [missionStarted, addLog, findBestReplacementDrone, victims])
 
-  // Victim detection logic - thermal scan
+  // Victim detection logic — reads dronesRef so the interval is stable
   useEffect(() => {
     if (!missionStarted) return
 
     const detectionInterval = setInterval(() => {
       setVictims(prevVictims => {
         return prevVictims.map(victim => {
-          // Skip if already detected or rescued
           if (victim.status !== "HIDDEN") return victim
-          
-          // Check if any SEARCHING drone is close enough to detect via thermal
-          const detectingDrone = drones.find(drone => {
+
+          const currentDrones = dronesRef.current
+          const detectingDrone = currentDrones.find(drone => {
             if (drone.status !== "SEARCHING") return false
             const dx = drone.position[0] - victim.position[0]
             const dz = drone.position[2] - victim.position[2]
             const dist = Math.sqrt(dx * dx + dz * dz)
-            return dist < 8 // Thermal detection range
+            return dist < 4
           })
-          
+
           if (detectingDrone) {
-            // Drone detected victim!
             addLog("ALERT", `THERMAL SIGNATURE DETECTED at [${victim.position[0].toFixed(1)}, ${victim.position[2].toFixed(1)}]!`, detectingDrone.id)
             addLog("REASONING", `${detectingDrone.id} thermal scan positive. Switching to TRACKING mode. Awaiting human dispatch order.`, "COMMAND")
-            
-            // Update drone to tracking mode
+
             setDrones(prev => prev.map(d => {
               if (d.id === detectingDrone.id) {
-                return { 
-                  ...d, 
-                  status: "TRACKING" as const, 
-                  position: [victim.position[0], 3, victim.position[2]], 
+                return {
+                  ...d,
+                  status: "TRACKING" as const,
+                  position: [victim.position[0], 3, victim.position[2]],
                   trackingVictimId: victim.id,
                   assignedSector: null
                 }
               }
               return d
             }))
-            
-            addLog("ACTION", `Holding position over victim. Sending distress signal to command. Awaiting rescue team dispatch.`, detectingDrone.id)
-            
-            // Create alert for human operator
+
+            addLog("ACTION", "Holding position over victim. Sending distress signal to command. Awaiting rescue team dispatch.", detectingDrone.id)
+
             const newAlert: VictimAlert = {
               id: `alert-${++alertIdRef.current}`,
               victimId: victim.id,
@@ -493,22 +613,22 @@ export default function DashboardPage() {
               status: "AWAITING_DISPATCH",
             }
             setAlerts(prev => [newAlert, ...prev])
-            
-            return { 
-              ...victim, 
-              status: "DETECTED", 
-              detectedAt: Date.now(), 
-              trackingDroneId: detectingDrone.id 
+
+            return {
+              ...victim,
+              status: "DETECTED",
+              detectedAt: Date.now(),
+              trackingDroneId: detectingDrone.id
             }
           }
-          
+
           return victim
         })
       })
     }, 1000)
 
     return () => clearInterval(detectionInterval)
-  }, [missionStarted, drones, addLog])
+  }, [missionStarted, addLog])
 
   // Rescue countdown timer - runs after human dispatches rescue team
   useEffect(() => {
@@ -537,18 +657,20 @@ export default function DashboardPage() {
               if (drone.battery > LOW_BATTERY_THRESHOLD) {
                 // Find a sector to search or go back to previous
                 const availableSector = Object.keys(SECTORS).find(s => 
-                  !d.some(dr => dr.assignedSector === s && dr.status === "SEARCHING")
+                  !d.some(dr => dr.assignedSector === s && (dr.status === "SEARCHING" || dr.status === "DEPLOYING"))
                 )
                 
                 if (availableSector) {
-                  addLog("REASONING", `Rescue complete. ${drone.id} battery sufficient (${drone.battery.toFixed(0)}%). Resuming search in Sector ${availableSector}.`, "COMMAND")
-                  addLog("ACTION", `Rescue mission complete. Returning to search pattern in Sector ${availableSector}.`, drone.id)
+                  addLog("REASONING", `Rescue complete. ${drone.id} battery sufficient (${drone.battery.toFixed(0)}%). Deploying to Sector ${availableSector}.`, "COMMAND")
+                  addLog("ACTION", `Rescue mission complete. Deploying to Sector ${availableSector}.`, drone.id)
+                  const wp = generateLawnmowerWaypoints(availableSector as keyof typeof SECTORS)
                   return { 
                     ...drone, 
-                    status: "SEARCHING" as const, 
-                    position: SECTORS[availableSector as keyof typeof SECTORS].center,
+                    status: "DEPLOYING" as const, 
                     trackingVictimId: undefined,
-                    assignedSector: availableSector
+                    assignedSector: availableSector,
+                    searchWaypoints: wp,
+                    searchPatternIndex: findNearestWaypointIndex(drone.position, wp),
                   }
                 } else {
                   addLog("REASONING", `All sectors covered. ${drone.id} returning to IDLE at base.`, "COMMAND")
@@ -583,7 +705,7 @@ export default function DashboardPage() {
     }, 1000)
 
     return () => clearInterval(rescueInterval)
-  }, [missionStarted, victims, addLog])
+  }, [missionStarted, addLog])
 
   // Handle human operator clicking "Acknowledge and Dispatch"
   const handleDispatchRescue = useCallback((alertId: string) => {
@@ -613,7 +735,7 @@ export default function DashboardPage() {
   }, [])
 
   // Convert DroneStatus to simulation format
-  const simulationDrones = drones.map((d) => ({
+  const simulationDrones = drones.filter(d => d.connected).map((d) => ({
     id: d.id,
     position: d.position,
     status: d.status,
@@ -622,13 +744,15 @@ export default function DashboardPage() {
   }))
 
   // Convert VictimData for simulation (only show detected/rescue_otw/rescued)
-  const simulationVictims = victims.map(v => ({
-    id: v.id,
-    position: v.position,
-    rescued: v.status === "RESCUED",
-    trackingDroneId: v.trackingDroneId,
-    status: v.status,
-  }))
+  const simulationVictims = victims
+    .filter(v => v.status !== "HIDDEN")
+    .map(v => ({
+      id: v.id,
+      position: v.position,
+      rescued: v.status === "RESCUED",
+      trackingDroneId: v.trackingDroneId,
+      status: v.status,
+    }))
 
   return (
     <div className="h-screen flex flex-col overflow-hidden">
@@ -679,6 +803,44 @@ export default function DashboardPage() {
 // Helper delay function
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+function generateLawnmowerWaypoints(
+  sector: keyof typeof SECTORS,
+  altitude: number = 5,
+  spacing: number = 4,
+): [number, number, number][] {
+  const { bounds } = SECTORS[sector]
+  const waypoints: [number, number, number][] = []
+  let row = 0
+  for (let z = bounds.minZ + 2; z <= bounds.maxZ - 2; z += spacing) {
+    if (row % 2 === 0) {
+      for (let x = bounds.minX + 2; x <= bounds.maxX - 2; x += spacing) {
+        waypoints.push([x, altitude, z])
+      }
+    } else {
+      for (let x = bounds.maxX - 2; x >= bounds.minX + 2; x -= spacing) {
+        waypoints.push([x, altitude, z])
+      }
+    }
+    row++
+  }
+  return waypoints
+}
+
+function findNearestWaypointIndex(
+  position: [number, number, number],
+  waypoints: [number, number, number][]
+): number {
+  let nearest = 0
+  let nearestDist = Infinity
+  for (let i = 0; i < waypoints.length; i++) {
+    const dx = waypoints[i][0] - position[0]
+    const dz = waypoints[i][2] - position[2]
+    const d = Math.sqrt(dx * dx + dz * dz)
+    if (d < nearestDist) { nearestDist = d; nearest = i }
+  }
+  return nearest
 }
 
 // Helper to generate search pattern trails

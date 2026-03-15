@@ -7,7 +7,7 @@ import { AlertTriangle, Battery, Wifi, MapPin, Zap } from "lucide-react"
 export interface DroneStatus {
   id: string
   position: [number, number, number]
-  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "MANUAL"
+  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING" | "MANUAL"
   battery: number
   target?: [number, number, number]
   connected: boolean
@@ -16,6 +16,8 @@ export interface DroneStatus {
   assignedSector?: string | null
   trackingVictimId?: string
   manualMode?: boolean
+  searchPatternIndex?: number
+  searchWaypoints?: [number, number, number][]
 }
 
 const statusConfig: Record<string, { color: string; bgColor: string; label: string }> = {
@@ -25,6 +27,7 @@ const statusConfig: Record<string, { color: string; bgColor: string; label: stri
   RECALLING: { color: "text-chart-3", bgColor: "bg-chart-3/20 border-chart-3/50", label: "RTH" },
   IDLE: { color: "text-muted-foreground", bgColor: "bg-muted/50 border-muted-foreground/30", label: "IDLE" },
   CHARGING: { color: "text-chart-4", bgColor: "bg-chart-4/20 border-chart-4/50", label: "CHARGING" },
+  DEPLOYING: { color: "text-cyan-400", bgColor: "bg-cyan-400/20 border-cyan-400/50", label: "DEPLOYING" },
   MANUAL: { color: "text-purple-400", bgColor: "bg-purple-400/20 border-purple-400/50", label: "MANUAL" },
 }
 
@@ -37,7 +40,9 @@ function DroneCard({
   isSelected: boolean
   onSelect: () => void
 }) {
-  const config = statusConfig[drone.status]
+  const config = drone.connected
+    ? statusConfig[drone.status]
+    : { color: "text-muted-foreground", bgColor: "bg-muted/30 border-muted-foreground/30", label: "OFFLINE" }
   const isLowBattery = drone.battery < 20
   const isCriticalBattery = drone.battery < 10
 
@@ -94,7 +99,7 @@ function DroneCard({
               />
             </div>
           </div>
-          <span className="text-muted-foreground w-8 text-right">{drone.battery}%</span>
+          <span className="text-muted-foreground w-8 text-right">{drone.battery.toFixed(2)}%</span>
         </div>
 
         {/* Connection */}
@@ -163,7 +168,9 @@ export default function FleetStatus({
   onSelectDrone: (id: string) => void
 }) {
   const activeDrones = drones.filter((d) => d.connected)
-  const totalBattery = drones.reduce((acc, d) => acc + d.battery, 0) / drones.length
+  const totalBattery = activeDrones.length > 0
+    ? activeDrones.reduce((acc, d) => acc + d.battery, 0) / activeDrones.length
+    : 0
 
   return (
     <div className="h-full flex flex-col bg-card border-l border-border">

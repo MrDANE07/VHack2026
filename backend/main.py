@@ -40,18 +40,18 @@ async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown."""
     global drones, movement_task
 
-    # Startup: Initialize drones
-    logger.info("Initializing drone fleet...")
-    drones = create_initial_drones()
-    logger.info(f"Created {len(drones)} drones")
+    logger.info("=" * 50)
+    logger.info("Starting AEGIS Drone Control API")
+    logger.info("=" * 50)
 
-    # Start the movement game loop
+    # Start empty — frontend sends setup config via sync_config message
+    drones = {}
+    logger.info("Waiting for frontend configuration...")
+
     movement_task = asyncio.create_task(movement_loop())
 
     yield
 
-    # Shutdown
-    logger.info("Shutting down...")
     if movement_task:
         movement_task.cancel()
         try:
@@ -230,6 +230,27 @@ async def websocket_endpoint(websocket: WebSocket):
                 if drone_id and drone_id in drones:
                     selected_drone_id = drone_id
                     logger.info(f"Selected drone: {drone_id}")
+
+            elif msg_type == "sync_config":
+                config = message.get("config", {})
+                logger.info(f"Received setup config with {len(config.get('drones', []))} drones")
+
+                drones = {}
+                for d in config.get("drones", []):
+                    if d.get("online"):
+                        drones[d["id"]] = Drone(
+                            id=d["id"],
+                            battery=d["battery"],
+                            position=[0, 2, 0],
+                            status="IDLE",
+                        )
+                        logger.info(f"  Created {d['id']} with battery {d['battery']}%")
+
+                await websocket.send_text(json.dumps({
+                    "type": "config_ack",
+                    "status": "success",
+                    "drone_count": len(drones),
+                }))
 
             elif msg_type == "get_state":
                 # Client requesting full state

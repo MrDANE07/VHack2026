@@ -14,7 +14,6 @@ export const VictimMarker = memo(function VictimMarker({ data }: { data: VictimD
   const isRescued   = data.status === "RESCUED" || data.rescued
   const isRescueOTW = data.status === "RESCUE_OTW"
   const color = isRescued ? "#22c55e" : isRescueOTW ? "#f59e0b" : "#ef4444"
-  const label = isRescued ? "RESCUED" : isRescueOTW ? "RESCUE OTW" : "DETECTED"
 
   useFrame((state) => {
     const t = state.clock.elapsedTime

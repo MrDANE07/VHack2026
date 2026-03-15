@@ -188,6 +188,16 @@
   animation: beacon 1.5s ease-in-out infinite;
 }
 
+@keyframes countdown-pop {
+  0% { transform: scale(2.5); opacity: 0; }
+  30% { transform: scale(1); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
+.animate-countdown {
+  animation: countdown-pop 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
 /* Tactical grid pattern */
 .tactical-grid {
   background-image: 
