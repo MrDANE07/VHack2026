@@ -251,3 +251,67 @@ python commander_agent.py
 - **AI Agent**: PydanticAI + OpenRouter
 - **MCP**: FastMCP
 - **Async I/O**: asyncio + aioconsole
+
+## Agent Execution & Mission Logging
+
+### How It Works
+
+The Commander Agent uses PydanticAI's structured output with message history for stateful conversation:
+
+```python
+# Agent execution with persistent context
+result = await commander_agent.run(
+    prompt,
+    deps=deps,
+    message_history=message_history
+)
+
+# Update history with new messages from the agent
+message_history = list(result.new_messages())
+```
+
+### Mission Log Output
+
+Each agent turn produces formatted console output:
+
+```
+ MISSION LOG - 2026-03-15 12:34:56 UTC
+==================================================
+
+>>> USER: Search sector A for victims
+
+--- INTERNAL MONOLOGUE ---
+[Agent's chain-of-thought reasoning]
+
+--- BATTERY ANALYSIS ---
+[Battery feasibility analysis]
+
+>>> CHOSEN ACTION: thermal_scan
+>>> RISK SCORE: 0.35
+```
+
+### JSON Persistence
+
+All mission decisions are persisted to `mission_history.json`:
+
+```json
+[
+  {
+    "timestamp": "2026-03-15T12:34:56.123456Z",
+    "user_input": "Search sector A for victims",
+    "internal_monologue": "...",
+    "battery_analysis": "...",
+    "chosen_action": "thermal_scan",
+    "risk_score": 0.35
+  }
+]
+```
+
+The file is stored in the backend directory and accumulates entries across all mission sessions.
+
+### Message History
+
+- Maintains conversation context across agent turns
+- Limited to last 20 messages to prevent context overflow
+- Updated automatically after each turn via `result.new_messages()`
+- Includes both user inputs and assistant responses

@@ -9,19 +9,25 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
+
+# Ensure API key is available in environment for pydantic_ai
+os.environ.setdefault('OPENROUTER_API_KEY', os.getenv('OPENROUTER_API_KEY', ''))
 
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, AgentContext
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.mcp import MCPServerStdio
-from pydantic_ai.providers.openrouter import OpenRouterProvider
 
 from drone_manager import DroneManager
 
 logger = logging.getLogger(__name__)
 
-# OpenRouter configuration
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+# OpenRouter configuration - use openrouter: prefix for pydantic_ai
+_raw_model = os.getenv("OPENROUTER_MODEL", "anthropic/claude-3.5-sonnet")
+OPENROUTER_MODEL = f"openrouter:{_raw_model}" if not _raw_model.startswith("openrouter:") else _raw_model
 
 
 class MissionThought(BaseModel):
@@ -84,21 +90,18 @@ mcp_server = MCPServerStdio(
 )
 
 
-# Create the PydanticAI agent with OpenRouter provider and MCP server
-# Uses OpenRouterProvider for unified API access to many models
+# Create the PydanticAI agent with OpenRouter and MCP server
+# Uses openrouter: prefix for model and reads API key from environment
 commander_agent: Agent[DroneDeps, MissionThought] = Agent(
-    provider=OpenRouterProvider(
-        api_key=OPENROUTER_API_KEY,
-    ),
     model=OPENROUTER_MODEL,
     system_prompt="",  # Will be set dynamically via decorator
-    result_type=MissionThought,
-    mcp_servers=[mcp_server],
+    output_type=MissionThought,
+    toolsets=[mcp_server],
 )
 
 
 @commander_agent.system_prompt
-async def get_dynamic_system_prompt(ctx: AgentContext[DroneDeps]) -> str:
+async def get_dynamic_system_prompt(ctx: RunContext[DroneDeps]) -> str:
     """Dynamic system prompt that includes current world state."""
     world_state = ctx.deps.drone_manager.get_world_summary()
 
@@ -206,7 +209,7 @@ Analyze the situation and provide your recommendation. Always prioritize battery
 
     result = await commander_agent.run(prompt, deps=deps)
 
-    return result.data
+    return result.output
 
 
 # Persistent message history for the agent
@@ -325,13 +328,13 @@ Output your reasoning, battery analysis, chosen action, and risk score."""
             print(" MISSION LOG - " + datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S") + " UTC")
             print("=" * 50)
             print(f"\n>>> USER: {user_input}")
-            print(f"\n--- INTERNAL MONOLOGUE ---\n{result.data.internal_monologue}")
-            print(f"\n--- BATTERY ANALYSIS ---\n{result.data.battery_analysis}")
-            print(f"\n>>> CHOSEN ACTION: {result.data.chosen_action}")
-            print(f">>> RISK SCORE: {result.data.risk_score:.2f}")
+            print(f"\n--- INTERNAL MONOLOGUE ---\n{result.output.internal_monologue}")
+            print(f"\n--- BATTERY ANALYSIS ---\n{result.output.battery_analysis}")
+            print(f"\n>>> CHOSEN ACTION: {result.output.chosen_action}")
+            print(f">>> RISK SCORE: {result.output.risk_score:.2f}")
 
             # Persist to mission_history.json
-            append_to_mission_log(result.data, user_input)
+            append_to_mission_log(result.output, user_input)
 
         except KeyboardInterrupt:
             print("\n\n[!] Interrupted. Saving state...")

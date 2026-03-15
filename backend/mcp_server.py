@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 mcp = fastmcp.FastMCP("aegis-drone-command")
 
 # Global instances
-drone_manager: DroneManager = None
+# drone_manager will be set by initialize_drone_manager()
 active_connections: Set[Any] = set()
 
 # Simulated victims for thermal scanning
@@ -534,8 +534,16 @@ async def main():
     logger.info("Available tools: discover_drones, get_fleet_status, move_drone, start_thermal_scan, verify_target, evaluate_fleet_for_task, get_world_state, return_to_base")
 
     # Run the server
-    await mcp.run_stdio()
+    await mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Initialize drone manager
+    global drone_manager
+    drone_manager = initialize_drone_manager()
+
+    logger.info("Starting AEGIS Drone MCP Server...")
+    logger.info("Available tools: discover_drones, get_fleet_status, move_drone, start_thermal_scan, verify_target, evaluate_fleet_for_task, get_world_state, return_to_base")
+
+    # Run MCP server directly (not inside asyncio.run since mcp.run manages its own loop)
+    mcp.run(transport="stdio")
