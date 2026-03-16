@@ -1,6 +1,5 @@
 "use client"
 
-import { useRef, useEffect } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 export interface LogEntry {
@@ -29,13 +28,8 @@ function formatTime(date: Date): string {
 }
 
 export default function MissionLog({ logs }: { logs: LogEntry[] }) {
-  const scrollRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [logs])
+  // Reverse logs so newest is at top
+  const reversedLogs = [...logs].reverse()
 
   return (
     <div className="h-full flex flex-col bg-card border-r border-border">
@@ -57,16 +51,15 @@ export default function MissionLog({ logs }: { logs: LogEntry[] }) {
         </p>
       </div>
 
-      {/* Log content */}
-      <ScrollArea className="flex-1 tactical-scrollbar" ref={scrollRef}>
+      {/* Log content - newest at top */}
+      <ScrollArea className="flex-1 tactical-scrollbar">
         <div className="p-3 space-y-2">
-          {logs.map((log, index) => {
+          {reversedLogs.map((log, index) => {
             const style = typeStyles[log.type]
             return (
               <div
                 key={log.id}
-                className="animate-typewriter font-mono text-xs leading-relaxed"
-                style={{ animationDelay: `${index * 0.05}s` }}
+                className="font-mono text-xs leading-relaxed"
               >
                 <div className="flex items-start gap-2">
                   <span className="text-muted-foreground shrink-0">

@@ -21,27 +21,111 @@ backend/
 
 WebSocket-based real-time server for the drone simulation:
 
-| Endpoint | Description |
-|----------|-------------|
-| `GET /ws/drone-control` | WebSocket for real-time drone control |
-| `GET /health` | Health check |
+#### REST Endpoints
 
-**Message Types:**
-- `keydown` / `keyup` - Manual drone control via arrow keys/WASD
-- `select_drone` - Choose active drone
-- `get_state` - Request full state
-- `drone_update` - Server broadcasts position/state at 30fps
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Root info with API version and endpoints |
+| `GET` | `/health` | Health check with drone count and connections |
+
+**Response Examples:**
+
+```json
+// GET /
+{
+  "name": "AEGIS Drone Control API",
+  "version": "1.0.0",
+  "endpoints": {
+    "websocket": "/ws/drone-control",
+    "docs": "/docs"
+  }
+}
+
+// GET /health
+{
+  "status": "healthy",
+  "drones": 4,
+  "connections": 2
+}
+```
+
+#### WebSocket Endpoint
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `WS` | `/ws/drone-control` | Real-time drone control and state sync |
+
+#### WebSocket Message Types (Client → Server)
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `keydown` | Start manual movement | `{"type": "keydown", "key": "ArrowUp", "droneId": "DRONE-01"}` |
+| `keyup` | Stop manual movement | `{"type": "keyup", "key": "ArrowUp", "droneId": "DRONE-01"}` |
+| `select_drone` | Select active drone | `{"type": "select_drone", "droneId": "DRONE-01"}` |
+| `sync_config` | Initialize drones from frontend | `{"type": "sync_config", "config": {"drones": [...]}}` |
+| `get_state` | Request full state | `{"type": "get_state"}` |
+
+**Key Mappings:**
+- `ArrowUp` / `w` → Move north (-Z)
+- `ArrowDown` / `s` → Move south (+Z)
+- `ArrowLeft` → Move west (-X)
+- `ArrowRight` → Move east (+X)
+- `W` (uppercase) → Increase altitude (+Y)
+- `S` (uppercase) → Decrease altitude (-Y)
+
+#### WebSocket Message Types (Server → Client)
+
+| Type | Description | Payload |
+|------|-------------|---------|
+| `initial_state` | Sent on connect | `{"type": "initial_state", "drones": {...}, "selectedDrone": "DRONE-01"}` |
+| `drone_update` | Broadcast at 30fps | `{"type": "drone_update", "drones": {...}, "selectedDrone": "DRONE-01"}` |
+| `config_ack` | Config sync acknowledgment | `{"type": "config_ack", "status": "success", "drone_count": 4}` |
+
+**Drone State Object:**
+```json
+{
+  "id": "DRONE-01",
+  "position": [12.5, 5, 12.5],
+  "status": "SEARCHING",
+  "battery": 95,
+  "connected": true,
+  "assignedSector": "A",
+  "trackingVictimId": null,
+  "manualMode": false,
+  "lastKeyPressed": null
+}
+```
 
 ### 2. Drone Model (`drone.py`)
 
 Dataclass representing a single drone with:
-- `id`: Unique identifier (e.g., "DRONE-01")
-- `position`: [x, y, z] coordinates
-- `status`: IDLE, SEARCHING, TRACKING, RECALLING, CHARGING, MANUAL
-- `battery`: 0-100%
-- `assigned_sector`: A, B, C, or D
-- `tracking_victim_id`: Victim being tracked
-- `manual_mode`: Boolean for manual control
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `str` | Unique identifier (e.g., "DRONE-01") |
+| `position` | `List[float]` | [x, y, z] coordinates |
+| `status` | `str` | IDLE, SEARCHING, TRACKING, RECALLING, CHARGING, MANUAL, MOVING, SCANNING |
+| `battery` | `float` | 0-100% |
+| `connected` | `bool` | Connection status |
+| `assigned_sector` | `Optional[str]` | A, B, C, or D |
+| `tracking_victim_id` | `Optional[str]` | Victim being tracked |
+| `manual_mode` | `bool` | Manual control flag |
+| `last_key_pressed` | `Optional[str]` | Last movement key |
+
+**Movement Bounds:**
+- X: 0-50, Z: 0-50 (horizontal bounds)
+- Y: 2-20 (altitude bounds)
+- Speed: 0.5 units/frame
+
+**Methods:**
+
+| Method | Description |
+|--------|-------------|
+| `move(direction: str)` | Move in direction: up, down, left, right, up_alt, down_alt |
+| `enter_manual_mode()` | Enter manual control, sets status to MANUAL |
+| `exit_manual_mode()` | Exit manual control, returns to SEARCHING or IDLE |
+| `get_state() -> Dict` | Returns full drone state as dictionary |
+| `update_from_dict(data: Dict)` | Update state from dictionary |
 
 ### 3. DroneManager (`drone_manager.py`)
 

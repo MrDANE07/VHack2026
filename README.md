@@ -1,3 +1,38 @@
+# VHack2026 - AEGIS SWARM Mission Control
+
+A full-stack application demonstrating autonomous drone search-and-rescue operations with thermal victim detection, featuring a real-time 3D visualization and AI-powered mission commander.
+
+## Quick Start
+
+### Frontend (Next.js + Three.js)
+
+```bash
+cd frontend
+npm install
+npm run dev
+# Open http://localhost:3000
+```
+
+### Backend (FastAPI + AI Agent)
+
+```bash
+cd backend
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+
+# Set OpenRouter API key
+# Create .env with OPENROUTER_API_KEY=your_key
+
+# Run WebSocket server
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# OR run Commander Agent (interactive)
+python commander_agent.py
+```
+
+---
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
@@ -22,30 +57,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### High-Level Structure
 
 ```
-frontend/
-├── app/                    # Next.js App Router
-│   ├── layout.tsx         # Root layout with fonts and analytics
-│   ├── page.tsx           # Main dashboard page with state orchestration
-│   └── globals.css        # Global styles with tactical theme
-├── components/            # React components
-│   ├── ui/               # shadcn/ui primitive components
-│   ├── drone-simulation.tsx  # 3D scene (Three.js/Canvas)
-│   ├── dashboard-header.tsx  # Top navigation/status bar
-│   ├── fleet-status.tsx      # Right sidebar - drone list
-│   ├── mission-log.tsx       # Left sidebar - event log
-│   ├── victim-alerts.tsx     # Bottom-left alert panel
-│   └── theme-provider.tsx    # Dark/light theme context
-├── hooks/                 # Custom React hooks
-│   ├── use-mobile.ts     # Responsive breakpoint detection
-│   └── use-toast.ts      # Toast notification system
-├── lib/
-│   └── utils.ts          # cn() utility for className merging
-├── public/               # Static assets
-├── styles/               # Additional CSS (empty, uses globals.css)
-├── package.json          # Dependencies and scripts
-├── tsconfig.json         # TypeScript configuration
-├── next.config.mjs       # Next.js config (ignores TS errors, unoptimized images)
-└── components.json       # shadcn/ui configuration
+frontend/                  # Next.js 16 + React + Three.js
+├── app/                  # App Router pages
+│   ├── page.tsx         # Main dashboard with simulation
+│   └── globals.css      # Tactical dark theme
+└── components/          # React components
+
+backend/                  # FastAPI + AI Agent
+├── main.py              # WebSocket server
+├── drone.py             # Drone model
+├── drone_manager.py     # Fleet management
+├── mcp_server.py        # MCP tools
+├── commander_agent.py   # AI Commander
+├── requirements.txt     # Python dependencies
+└── mission_history.json # Mission audit log
 ```
 
 ### Core Application Flow
@@ -75,6 +100,43 @@ The main simulation lives in `frontend/app/page.tsx` (`DashboardPage` component)
   - IDLE: Gray
   - CHARGING: Green
   - Battery displayed as colored bar on drone
+
+### Backend Components
+
+The backend provides AI-powered mission command and WebSocket connectivity:
+
+```
+backend/
+├── main.py              # FastAPI + WebSocket server
+├── drone.py             # Drone dataclass model
+├── drone_manager.py     # Fleet coordination & grid
+├── mcp_server.py        # MCP tools for AI agents
+├── commander_agent.py   # AI Commander (PydanticAI + OpenRouter)
+└── mission_history.json # Persistent mission audit log
+```
+
+#### Commander Agent
+
+The AI-powered Commander Agent coordinates autonomous drone operations:
+
+- **Structured Output**: Returns `MissionThought` with reasoning, battery analysis, chosen action, and risk score
+- **Battery Safety**: Enforces 15% safety margin, prioritizes RTB below 20%
+- **MCP Tools**: Uses 8 tools for drone control (move, scan, verify, return_to_base, etc.)
+- **Interactive Mode**: Run `python commander_agent.py` for CLI control
+
+```bash
+[Mission Command] > Search sector A for victims
+[Mission Command] > Verify thermal signature at position 15, 18
+[Mission Command] > quit
+```
+
+#### Mission Logging
+
+Each agent decision is logged to `mission_history.json`:
+- Timestamp (UTC)
+- User input
+- Internal monologue & battery analysis
+- Chosen action & risk score
 
 ## Development Commands
 
@@ -293,8 +355,8 @@ The `MissionLog` displays chain-of-thought reasoning from a simulated "command a
 ## Git Workflow
 
 - Main branch: `main`
-- Frontend files in `/frontend` directory
-- Backend directory exists but empty (`.gitkeep` only)
+- Frontend in `/frontend` directory
+- Backend in `/backend` directory
 - Commit messages: Follow existing patterns or use descriptive sentences
 
 ## Related Resources

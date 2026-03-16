@@ -94,16 +94,22 @@ function Dashboard({ config }: { config: SetupConfig }) {
   const dronesRef = useRef(drones)
   useEffect(() => { dronesRef.current = drones }, [drones])
 
-  // Add log entry
+  // Add log entry (with deduplication)
   const addLog = useCallback((type: LogEntry["type"], message: string, droneId?: string) => {
-    const newLog: LogEntry = {
-      id: `log-${++logIdRef.current}`,
-      timestamp: new Date(),
-      type,
-      message,
-      droneId,
-    }
-    setLogs((prev) => [...prev, newLog])
+    const sig = `${type}:${message}:${droneId}`
+    // Check if same log already exists in last 10 entries
+    setLogs((prev) => {
+      const recentSig = new Set(prev.slice(-10).map(l => `${l.type}:${l.message}:${l.droneId}`))
+      if (recentSig.has(sig)) return prev
+      const newLog: LogEntry = {
+        id: `log-${++logIdRef.current}`,
+        timestamp: new Date(),
+        type,
+        message,
+        droneId,
+      }
+      return [...prev, newLog]
+    })
   }, [])
 
   // Find best replacement drone for handoff
@@ -238,6 +244,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
       ws.onmessage = (event) => {
         try {
           const message = JSON.parse(event.data)
+
           if (message.type === "drone_update" || message.type === "initial_state") {
             const backendDrones = message.drones
             setDrones(prev => prev.map(drone => {
@@ -255,6 +262,55 @@ function Dashboard({ config }: { config: SetupConfig }) {
               }
               return drone
             }))
+
+            // Update victims from backend
+            if (message.victims) {
+              setVictims(prev => prev.map(v => {
+                const backendVictim = message.victims[v.id]
+                if (backendVictim) {
+                  return {
+                    ...v,
+                    status: backendVictim.detected ? (backendVictim.rescued ? "RESCUED" as const : "DETECTED" as const) : v.status,
+                    trackingDroneId: backendVictim.tracking_drone_id || v.trackingDroneId,
+                  }
+                }
+                return v
+              }))
+            }
+
+            // Update logs from backend (with deduplication)
+            if (message.logs && message.logs.length > 0) {
+              setLogs(prev => {
+                // Create a Set of existing log signatures to avoid duplicates
+                const existingSigs = new Set(prev.map(l => `${l.type}:${l.message}:${l.droneId}`))
+                const newLogs = message.logs
+                  .map((l: any, i: number) => ({
+                    id: `log-${Date.now()}-${i}`,
+                    timestamp: new Date(),
+                    type: l.type as LogEntry["type"],
+                    message: l.message,
+                    droneId: l.droneId,
+                  }))
+                  .filter(l => !existingSigs.has(`${l.type}:${l.message}:${l.droneId}`))
+                return [...prev, ...newLogs].slice(-100)
+              })
+            }
+
+            // Update alerts from backend
+            if (message.alerts) {
+              setAlerts(message.alerts.map((a: any) => ({
+                id: a.id,
+                victimId: a.victimId,
+                timestamp: new Date(),
+                coordinates: a.position as [number, number, number],
+                detectedBy: a.droneId || "UNKNOWN",
+                status: a.status as VictimAlert["status"],
+              })))
+            }
+          }
+
+          if (message.type === "mission_started") {
+            setMissionStarted(true)
           }
         } catch {
           // ignore malformed messages
@@ -298,6 +354,12 @@ function Dashboard({ config }: { config: SetupConfig }) {
       config: { drones: config.drones, victims: config.victims },
     }))
   }, [wsConnected, config])
+
+  // Send start_mission to backend when mission starts
+  useEffect(() => {
+    if (!missionStarted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    wsRef.current.send(JSON.stringify({ type: "start_mission" }))
+  }, [missionStarted])
 
   useEffect(() => {
   // Guard: Ensure we have a socket and a drone selected
@@ -709,25 +771,17 @@ function Dashboard({ config }: { config: SetupConfig }) {
 
   // Handle human operator clicking "Acknowledge and Dispatch"
   const handleDispatchRescue = useCallback((alertId: string) => {
-    setAlerts(prev => prev.map(alert => {
-      if (alert.id === alertId && alert.status === "AWAITING_DISPATCH") {
-        addLog("ACTION", `Human operator acknowledged. Rescue team dispatched to [${alert.coordinates[0].toFixed(1)}, ${alert.coordinates[2].toFixed(1)}].`)
-        addLog("SYSTEM", `Rescue team ETA: 10 seconds. ${alert.detectedBy} will maintain position until arrival.`)
-        
-        // Update victim status
-        setVictims(v => v.map(vic => 
-          vic.id === alert.victimId ? { ...vic, status: "RESCUE_OTW" as const } : vic
-        ))
-        
-        return { 
-          ...alert, 
-          status: "RESCUE_OTW" as const, 
-          rescueCountdown: 10 
-        }
-      }
-      return alert
-    }))
-  }, [addLog])
+    const alert = alerts.find(a => a.id === alertId)
+    if (!alert || alert.status !== "AWAITING_DISPATCH") return
+
+    // Send rescue_dispatch to backend - backend handles the rest
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: "rescue_dispatch",
+        victimId: alert.victimId,
+      }))
+    }
+  }, [alerts])
 
   // Handle alert dismissal
   const handleDismissAlert = useCallback((alertId: string) => {

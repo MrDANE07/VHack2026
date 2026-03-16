@@ -5,7 +5,7 @@ import sys
 import json
 import logging
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,6 +20,7 @@ os.environ.setdefault('OPENROUTER_API_KEY', os.getenv('OPENROUTER_API_KEY', ''))
 from pydantic import BaseModel, Field
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.mcp import MCPServerStdio
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
 
 from drone_manager import DroneManager
 
@@ -62,6 +63,13 @@ class DroneDeps:
     drone_manager: DroneManager
 
 
+@dataclass
+class AgentResult:
+    """Result from the agent including output and tool calls."""
+    output: MissionThought
+    tool_calls: list = field(default_factory=list)
+
+
 # Base system prompt that emphasizes battery analysis
 BASE_SYSTEM_PROMPT = """You are the AEGIS Swarm Commander Agent, responsible for coordinating
 autonomous drone search-and-rescue operations in a disaster zone.
@@ -72,7 +80,12 @@ Before every action, you must:
 1. Check the battery level of any drone you intend to use
 2. Calculate if there's sufficient battery for the action plus a 15% safety margin
 3. If battery is insufficient (< 20%), prioritize returning the drone to base
-4. Never assign a task to a drone with < 40% battery unless it's a rescue mission
+
+When a victim is detected:
+1. Acknowledge the detection in your reasoning
+2. Note that human approval is required for rescue dispatch
+3. Coordinate other drones to continue searching remaining sectors while waiting
+4. Monitor battery levels of tracking drones
 
 IMPORTANT: Every tool call result is automatically broadcasted to the frontend in real-time.
 You don't need to explicitly notify the frontend - the system handles that. Your focus should
@@ -188,7 +201,7 @@ async def analyze_battery_for_task(
     }
 
 
-async def get_actionable_recommendation(deps: DroneDeps, context: str) -> MissionThought:
+async def get_actionable_recommendation(deps: DroneDeps, context: str) -> AgentResult:
     """Get a mission recommendation from the agent.
 
     Args:
@@ -196,7 +209,7 @@ async def get_actionable_recommendation(deps: DroneDeps, context: str) -> Missio
         context: Current mission context/situation
 
     Returns:
-        MissionThought with the agent's reasoning and recommended action
+        AgentResult with the agent's reasoning, action, and tool calls
     """
     fleet_info = await get_fleet_overview(deps)
 
@@ -209,7 +222,23 @@ Analyze the situation and provide your recommendation. Always prioritize battery
 
     result = await commander_agent.run(prompt, deps=deps)
 
-    return result.output
+    # Extract tool calls from the message history
+    tool_calls = []
+    try:
+        for msg in result.new_messages():
+            # Check for tool request messages
+            if hasattr(msg, 'parts'):
+                for part in msg.parts:
+                    if hasattr(part, 'tool_name') and part.tool_name:
+                        tool_calls.append({
+                            "tool": part.tool_name,
+                            "args": str(part.args) if hasattr(part, 'args') else "",
+                            "result": str(part.result) if hasattr(part, 'result') else ""
+                        })
+    except Exception as e:
+        logger.warning(f"Could not extract tool calls: {e}")
+
+    return AgentResult(output=result.output, tool_calls=tool_calls)
 
 
 # Persistent message history for the agent
