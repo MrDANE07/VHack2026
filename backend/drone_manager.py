@@ -9,6 +9,270 @@ from drone import Drone
 logger = logging.getLogger(__name__)
 
 
+# Grid state constants
+class GridState:
+    UNEXPLORED = "UNEXPLORED"
+    EXPLORED = "EXPLORED"
+    RESERVED = "RESERVED"
+    VICTIM = "VICTIM"
+
+
+def get_sector_id(x: float, z: float) -> str:
+    """
+    Map coordinates to one of 4 sectors based on 25×25 quadrant layout.
+
+    Sectors:
+        A: NW quadrant (x: 0-25, z: 0-25)
+        B: NE quadrant (x: 25-50, z: 0-25)
+        C: SW quadrant (x: 0-25, z: 25-50)
+        D: SE quadrant (x: 25-50, z: 25-50)
+
+    Args:
+        x: X coordinate (east-west)
+        z: Z coordinate (north-south)
+
+    Returns:
+        Sector identifier (A, B, C, or D)
+    """
+    if x < 25:
+        if z < 25:
+            return "A"
+        else:
+            return "C"
+    else:
+        if z < 25:
+            return "B"
+        else:
+            return "D"
+
+
+class GridManager:
+    """
+    Manages the 50×50 disaster zone grid with 2,500 points.
+    Tracks exploration state per coordinate and provides sector summaries.
+    """
+
+    GRID_SIZE: int = 50  # 50×50 = 2,500 points
+
+    def __init__(self):
+        """Initialize the grid with all points set to UNEXPLORED."""
+        # 2D array: grid[x][z] = state
+        self.grid: Dict[Tuple[int, int], str] = {}
+        # Track victim IDs at coordinates
+        self._victims: Dict[Tuple[int, int], str] = {}
+        self._initialize_grid()
+
+    def _initialize_grid(self) -> None:
+        """Initialize all 2,500 grid points to UNEXPLORED."""
+        for x in range(self.GRID_SIZE):
+            for z in range(self.GRID_SIZE):
+                self.grid[(x, z)] = GridState.UNEXPLORED
+        logger.info(f"Initialized GridManager with {len(self.grid)} points")
+
+    def get_state(self, x: int, z: int) -> Optional[str]:
+        """Get the state of a grid point."""
+        if 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE:
+            return self.grid.get((x, z))
+        return None
+
+    def set_state(self, x: int, z: int, state: str) -> bool:
+        """Set the state of a grid point."""
+        if 0 <= x < self.GRID_SIZE and 0 <= z < self.GRID_SIZE:
+            self.grid[(x, z)] = state
+            return True
+        return False
+
+    def mark_explored(self, x: int, z: int) -> bool:
+        """Mark a grid point as EXPLORED."""
+        return self.set_state(x, z, GridState.EXPLORED)
+
+    def reserve(self, x: int, z: int, drone_id: str) -> bool:
+        """Reserve a grid point for a specific drone."""
+        # Store drone_id in a separate reservation map
+        if not hasattr(self, '_reservations'):
+            self._reservations: Dict[Tuple[int, int], str] = {}
+        if self.get_state(x, z) == GridState.UNEXPLORED:
+            self._reservations[(x, z)] = drone_id
+            return self.set_state(x, z, GridState.RESERVED)
+        return False
+
+    def get_reservations(self, drone_id: str) -> List[Tuple[int, int]]:
+        """Get all coordinates reserved by a specific drone."""
+        if not hasattr(self, '_reservations'):
+            return []
+        return [
+            coord for coord, d_id in self._reservations.items()
+            if d_id == drone_id
+        ]
+
+    def clear_reservations(self, drone_id: str) -> int:
+        """
+        Clear all reservations for a drone and reset to UNEXPLORED.
+
+        Args:
+            drone_id: The drone ID whose reservations to clear
+
+        Returns:
+            Number of reservations cleared
+        """
+        if not hasattr(self, '_reservations'):
+            return 0
+
+        cleared = 0
+        to_remove = []
+        for coord, d_id in self._reservations.items():
+            if d_id == drone_id:
+                x, z = coord
+                self.set_state(x, z, GridState.UNEXPLORED)
+                to_remove.append(coord)
+                cleared += 1
+
+        for coord in to_remove:
+            del self._reservations[coord]
+
+        if cleared > 0:
+            logger.info(f"Cleared {cleared} reservations for {drone_id}")
+        return cleared
+
+    def get_sector_summary(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get the exploration percentage for each of the 4 sectors.
+
+        Returns:
+            Dictionary mapping sector ID to exploration stats
+        """
+        sector_stats = {
+            "A": {"total": 0, "explored": 0, "reserved": 0},
+            "B": {"total": 0, "explored": 0, "reserved": 0},
+            "C": {"total": 0, "explored": 0, "reserved": 0},
+            "D": {"total": 0, "explored": 0, "reserved": 0},
+        }
+
+        for (x, z), state in self.grid.items():
+            sector = get_sector_id(float(x), float(z))
+            sector_stats[sector]["total"] += 1
+            if state == GridState.EXPLORED:
+                sector_stats[sector]["explored"] += 1
+            elif state == GridState.RESERVED:
+                sector_stats[sector]["reserved"] += 1
+
+        # Calculate percentages
+        summary = {}
+        for sector, stats in sector_stats.items():
+            total = stats["total"]
+            explored = stats["explored"]
+            percentage = (explored / total * 100) if total > 0 else 0.0
+            summary[sector] = {
+                "total": total,
+                "explored": explored,
+                "reserved": stats["reserved"],
+                "percentage": round(percentage, 1)
+            }
+
+        return summary
+
+    def add_victim(self, x: float, z: float, victim_id: str) -> bool:
+        """Mark a grid point as containing a victim."""
+        cell_x, cell_z = int(x), int(z)
+        if 0 <= cell_x < self.GRID_SIZE and 0 <= cell_z < self.GRID_SIZE:
+            self._victims[(cell_x, cell_z)] = victim_id
+            self.grid[(cell_x, cell_z)] = GridState.VICTIM
+            logger.info(f"Victim {victim_id} added at ({cell_x}, {cell_z})")
+            return True
+        return False
+
+    def remove_victim(self, victim_id: str) -> bool:
+        """Remove a victim from the grid."""
+        for coord, v_id in self._victims.items():
+            if v_id == victim_id:
+                x, z = coord
+                del self._victims[(x, z)]
+                # Reset to UNEXPLORED (or EXPLORED if it was visited)
+                current_state = self.get_state(x, z)
+                if current_state == GridState.VICTIM:
+                    self.set_state(x, z, GridState.UNEXPLORED)
+                logger.info(f"Victim {victim_id} removed from grid")
+                return True
+        return False
+
+    def get_victims(self) -> Dict[str, Dict[str, Any]]:
+        """Get all victims in the grid."""
+        victims = {}
+        for (x, z), victim_id in self._victims.items():
+            victims[victim_id] = {
+                "id": victim_id,
+                "position": {"x": x, "z": z},
+                "world_x": float(x),
+                "world_z": float(z),
+            }
+        return victims
+
+    def clear_victims(self) -> None:
+        """Remove all victims from the grid."""
+        self._victims.clear()
+        # Reset all VICTIM cells to UNEXPLORED
+        for (x, z), state in self.grid.items():
+            if state == GridState.VICTIM:
+                self.grid[(x, z)] = GridState.UNEXPLORED
+
+    def get_nearest_unexplored(self, sector: str, from_x: float = 0, from_z: float = 0) -> Optional[Dict[str, float]]:
+        """
+        Find the nearest unexplored grid point in a sector.
+
+        Args:
+            sector: Sector identifier (A, B, C, or D)
+            from_x: Starting X coordinate for distance calculation
+            from_z: Starting Z coordinate for distance calculation
+
+        Returns:
+            Dict with 'x', 'z', 'distance' or None if sector is fully explored
+        """
+        # Get sector bounds
+        sector_bounds = {
+            "A": (0, 25, 0, 25),
+            "B": (25, 50, 0, 25),
+            "C": (0, 25, 25, 50),
+            "D": (25, 50, 25, 50),
+        }
+        if sector not in sector_bounds:
+            return None
+
+        min_x, max_x, min_z, max_z = sector_bounds[sector]
+
+        # Find all unexplored points in sector
+        unexplored = []
+        for (x, z), state in self.grid.items():
+            if state == GridState.UNEXPLORED and min_x <= x < max_x and min_z <= z < max_z:
+                # Calculate distance from starting point
+                distance = ((x - from_x) ** 2 + (z - from_z) ** 2) ** 0.5
+                unexplored.append({"x": x, "z": z, "distance": distance})
+
+        if not unexplored:
+            return None
+
+        # Return nearest
+        nearest = min(unexplored, key=lambda p: p["distance"])
+        return {"x": float(nearest["x"]), "z": float(nearest["z"]), "distance": nearest["distance"]}
+
+    def get_all_unexplored_in_sector(self, sector: str) -> List[Dict[str, int]]:
+        """Get all unexplored coordinates in a sector."""
+        sector_bounds = {
+            "A": (0, 25, 0, 25),
+            "B": (25, 50, 0, 25),
+            "C": (0, 25, 25, 50),
+            "D": (25, 50, 25, 50),
+        }
+        if sector not in sector_bounds:
+            return []
+
+        min_x, max_x, min_z, max_z = sector_bounds[sector]
+        unexplored = []
+        for (x, z), state in self.grid.items():
+            if state == GridState.UNEXPLORED and min_x <= x < max_x and min_z <= z < max_z:
+                unexplored.append({"x": x, "z": z})
+        return unexplored
+
+
 @dataclass
 class GridCell:
     """Represents a cell in the disaster zone grid."""
@@ -31,6 +295,7 @@ class DroneManager:
         """Initialize the DroneManager with an empty fleet and grid."""
         self.drones: Dict[str, Drone] = {}
         self.grid_map: Dict[Tuple[int, int], GridCell] = {}
+        self.grid_manager: GridManager = GridManager()  # 2,500 point grid
         self.selected_drone_id: Optional[str] = None
         self._initialize_grid()
 
@@ -44,40 +309,17 @@ class DroneManager:
 
     def initialize_fleet(self) -> Dict[str, Drone]:
         """
-        Create and initialize the drone fleet.
+        Create and initialize the drone fleet at charging base (0, 0).
 
         Returns:
             Dictionary of drone ID -> Drone instances
         """
+        base_position: List[float] = [0, 2, 0]  # Charging hub at origin
         self.drones = {
-            "DRONE-01": Drone(
-                id="DRONE-01",
-                position=[12.5, 5, 12.5],
-                status="SEARCHING",
-                battery=95,
-                assigned_sector="A"
-            ),
-            "DRONE-02": Drone(
-                id="DRONE-02",
-                position=[37.5, 5, 12.5],
-                status="SEARCHING",
-                battery=88,
-                assigned_sector="B"
-            ),
-            "DRONE-03": Drone(
-                id="DRONE-03",
-                position=[12.5, 5, 37.5],
-                status="SEARCHING",
-                battery=72,
-                assigned_sector="C"
-            ),
-            "DRONE-04": Drone(
-                id="DRONE-04",
-                position=[37.5, 5, 37.5],
-                status="SEARCHING",
-                battery=65,
-                assigned_sector="D"
-            ),
+            "DRONE-01": Drone(id="DRONE-01", position=base_position.copy(), battery=95),
+            "DRONE-02": Drone(id="DRONE-02", position=base_position.copy(), battery=88),
+            "DRONE-03": Drone(id="DRONE-03", position=base_position.copy(), battery=72),
+            "DRONE-04": Drone(id="DRONE-04", position=base_position.copy(), battery=65),
         }
         logger.info(f"Initialized fleet with {len(self.drones)} drones")
         return self.drones
@@ -158,52 +400,57 @@ class DroneManager:
         ]
 
     def get_cell_from_position(self, x: float, z: float) -> Optional[GridCell]:
-        """Get the grid cell corresponding to a world position."""
+        """Get the grid cell corresponding to a world position (legacy compatibility)."""
+        # Convert to cell coordinates (5x5 unit cells for backward compatibility)
         cell_x = int(x // self.CELL_SIZE)
         cell_z = int(z // self.CELL_SIZE)
         return self.grid_map.get((cell_x, cell_z))
 
     def mark_cell_visited(self, x: float, z: float) -> None:
-        """Mark a grid cell as visited."""
-        cell = self.get_cell_from_position(x, z)
-        if cell:
-            cell.visited = True
+        """Mark a grid cell as visited. Now uses GridManager (50x50)."""
+        # Use GridManager for 50x50 grid
+        cell_x, cell_z = int(x), int(z)
+        self.grid_manager.mark_explored(cell_x, cell_z)
 
     def add_victim(self, x: float, z: float, victim_id: str) -> None:
-        """Mark a cell as containing a victim."""
-        cell = self.get_cell_from_position(x, z)
-        if cell:
-            cell.has_victim = True
-            cell.victim_id = victim_id
+        """Mark a cell as containing a victim. Now uses GridManager (50x50)."""
+        # Use GridManager for 50x50 grid
+        self.grid_manager.add_victim(x, z, victim_id)
+
+    def clear_victims(self) -> None:
+        """Remove all victims from the grid. Now uses GridManager (50x50)."""
+        self.grid_manager.clear_victims()
+
+    def clear_drones(self) -> None:
+        """Clear all drones from the fleet."""
+        self.drones.clear()
 
     def remove_victim(self, victim_id: str) -> None:
-        """Remove a victim from the grid."""
-        for cell in self.grid_map.values():
-            if cell.victim_id == victim_id:
-                cell.has_victim = False
-                cell.victim_id = None
-                logger.info(f"Victim {victim_id} removed from grid")
-                break
+        """Remove a victim from the grid. Now uses GridManager (50x50)."""
+        self.grid_manager.remove_victim(victim_id)
 
     def set_danger_level(self, x: float, z: float, level: float) -> None:
-        """Set the danger level for a grid cell."""
-        cell = self.get_cell_from_position(x, z)
-        if cell:
-            cell.danger_level = max(0.0, min(1.0, level))
+        """Set the danger level for a grid cell (not implemented in GridManager)."""
+        # Danger level not yet implemented in GridManager
+        pass
 
     def get_visited_percentage(self) -> float:
-        """Get the percentage of cells visited."""
-        if not self.grid_map:
-            return 0.0
-        visited = sum(1 for cell in self.grid_map.values() if cell.visited)
-        return (visited / len(self.grid_map)) * 100
+        """Get the percentage of cells visited. Now uses GridManager (50x50)."""
+        summary = self.grid_manager.get_sector_summary()
+        total_explored = sum(s["explored"] for s in summary.values())
+        total_points = sum(s["total"] for s in summary.values())
+        return (total_explored / total_points * 100) if total_points > 0 else 0.0
 
     def get_grid_summary(self) -> Dict[str, Any]:
-        """Get a summary of the grid state."""
+        """Get a summary of the grid state. Now uses GridManager (50x50)."""
+        summary = self.grid_manager.get_sector_summary()
+        total_explored = sum(s["explored"] for s in summary.values())
+        total_points = sum(s["total"] for s in summary.values())
+        total_victims = len(self.grid_manager.get_victims())
         return {
-            "total_cells": len(self.grid_map),
-            "visited_cells": sum(1 for c in self.grid_map.values() if c.visited),
-            "victim_count": sum(1 for c in self.grid_map.values() if c.has_victim),
+            "total_cells": total_points,  # 2,500 for 50x50
+            "visited_cells": total_explored,
+            "victim_count": total_victims,
             "visited_percentage": self.get_visited_percentage(),
         }
 
@@ -227,6 +474,16 @@ class DroneManager:
                     }
                 })
 
+        # Get victims from GridManager (50x50)
+        grid_victims = {}
+        victims = self.grid_manager.get_victims()
+        for victim_id, victim_data in victims.items():
+            grid_victims[victim_id] = {
+                "id": victim_id,
+                "position": victim_data["position"],
+                "danger_level": 0.0  # Not implemented in GridManager yet
+            }
+
         return {
             "grid": {
                 "size": self.GRID_SIZE,
@@ -235,6 +492,7 @@ class DroneManager:
             },
             "sectors": sectors,
             "charging_base": {"x": 0, "z": 0},
+            "victims": grid_victims,
             "drones": {
                 drone_id: {
                     "id": drone.id,
@@ -433,6 +691,13 @@ class DroneManager:
         """
         drone = self.get_drone(drone_id)
         if drone:
+            # Hand-off hook: Clear any RESERVED coordinates for this drone
+            cleared_count = self.grid_manager.clear_reservations(drone_id)
+            if cleared_count > 0:
+                logger.info(
+                    f"Hand-off: Cleared {cleared_count} RESERVED points for {drone_id}"
+                )
+
             drone.status = "RECALLING"
             drone.assigned_sector = None
             logger.info(f"Commanded {drone_id} to return to base")

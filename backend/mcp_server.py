@@ -15,7 +15,7 @@ import fastmcp
 
 # Import existing drone components
 from drone import Drone
-from drone_manager import DroneManager, GridCell
+from drone_manager import DroneManager, GridCell, get_sector_id
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -427,33 +427,75 @@ async def get_world_state() -> str:
 
     Provides:
     - Grid dimensions and cell count
-    - Exploration percentage
+    - Exploration percentage per sector
+    - Nearest unexplored grid in each sector
+    - Abandoned Sectors (sectors that were being searched but are now unassigned)
     - Known victim/target locations
     - Sector assignments
     """
     grid_summary = drone_manager.get_grid_summary()
+    grid_manager = drone_manager.grid_manager
 
-    # Get all known victims
+    # Get sector exploration summary
+    sector_exploration = grid_manager.get_sector_summary()
+
+    # Get nearest unexplored for each sector
+    nearest_unexplored = {}
+    for sector in ["A", "B", "C", "D"]:
+        # Start search from sector center
+        sector_centers = {"A": [12.5, 12.5], "B": [37.5, 12.5], "C": [12.5, 37.5], "D": [37.5, 37.5]}
+        center = sector_centers[sector]
+        nearest = grid_manager.get_nearest_unexplored(sector, center[0], center[1])
+        if nearest:
+            nearest_unexplored[sector] = {"x": nearest["x"], "z": nearest["z"], "distance": round(nearest["distance"], 1)}
+        else:
+            nearest_unexplored[sector] = {"x": None, "z": None, "distance": None, "fully_explored": True}
+
+    # Get currently assigned sectors
+    currently_assigned = set()
+    for drone in drone_manager.get_all_drones().values():
+        if drone.assigned_sector and drone.status == "SEARCHING":
+            currently_assigned.add(drone.assigned_sector)
+
+    # Find abandoned sectors (were SEARCHING but now unassigned)
+    # We track sectors that were previously assigned but are now without active searchers
+    abandoned_sectors = []
+
+    # Check if there are any sectors that had exploration but no current searchers
+    all_sectors = {"A", "B", "C", "D"}
+    for sector in all_sectors:
+        # A sector is considered "abandoned" if:
+        # 1. It was previously assigned to a drone that is now RECALLING or IDLE
+        # 2. It still has unexplored areas
+        for drone in drone_manager.get_all_drones().values():
+            if drone.assigned_sector == sector and drone.status in ["RECALLING", "IDLE"]:
+                # Check if sector still has unexplored areas
+                unexplored = grid_manager.get_all_unexplored_in_sector(sector)
+                if len(unexplored) > 0 and sector not in currently_assigned:
+                    abandoned_sectors.append(sector)
+                    break
+
+    # Get all known victims from GridManager (50x50)
     victims = []
-    for cell in drone_manager.grid_map.values():
-        if cell.has_victim:
-            victims.append({
-                "victim_id": cell.victim_id,
-                "grid_position": {"x": cell.x, "z": cell.z},
-                "world_position": {
-                    "x": cell.x * drone_manager.CELL_SIZE + drone_manager.CELL_SIZE / 2,
-                    "z": cell.z * drone_manager.CELL_SIZE + drone_manager.CELL_SIZE / 2
-                },
-                "danger_level": cell.danger_level
-            })
+    grid_victims = grid_manager.get_victims()
+    for victim_id, victim_data in grid_victims.items():
+        victims.append({
+            "victim_id": victim_id,
+            "grid_position": victim_data["position"],
+            "world_position": {
+                "x": victim_data["world_x"],
+                "z": victim_data["world_z"]
+            },
+            "danger_level": 0.0  # Not implemented in GridManager yet
+        })
 
     # Get sector assignments
-    sectors = {}
+    sector_assignments = {}
     for drone_id, drone in drone_manager.get_all_drones().items():
         if drone.assigned_sector:
-            if drone.assigned_sector not in sectors:
-                sectors[drone.assigned_sector] = []
-            sectors[drone.assigned_sector].append({
+            if drone.assigned_sector not in sector_assignments:
+                sector_assignments[drone.assigned_sector] = []
+            sector_assignments[drone.assigned_sector].append({
                 "drone_id": drone_id,
                 "status": drone.status,
                 "battery": round(drone.battery, 1)
@@ -467,8 +509,18 @@ async def get_world_state() -> str:
             "visited_cells": grid_summary["visited_cells"],
             "exploration_percentage": round(grid_summary["visited_percentage"], 1)
         },
+        "sector_exploration": {
+            sector: {
+                "percentage": data["percentage"],
+                "explored": data["explored"],
+                "total": data["total"]
+            }
+            for sector, data in sector_exploration.items()
+        },
+        "nearest_unexplored": nearest_unexplored,
+        "abandoned_sectors": abandoned_sectors,
         "victims": victims,
-        "sectors": sectors,
+        "sectors": sector_assignments,
         "charging_base": {"x": 0, "z": 0}
     }, indent=2)
 

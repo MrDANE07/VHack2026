@@ -72,12 +72,13 @@ agent_trigger_event: asyncio.Event = None  # type: ignore
 
 
 def create_initial_drones() -> Dict[str, Drone]:
-    """Create the initial drone fleet."""
+    """Create the initial drone fleet at charging base (0, 0)."""
+    base_position: List[float] = [0, 2, 0]  # Charging hub at origin
     return {
-        "DRONE-01": Drone(id="DRONE-01", position=[12.5, 5, 12.5], status="SEARCHING", battery=95, assigned_sector="A"),
-        "DRONE-02": Drone(id="DRONE-02", position=[37.5, 5, 12.5], status="SEARCHING", battery=88, assigned_sector="B"),
-        "DRONE-03": Drone(id="DRONE-03", position=[12.5, 5, 37.5], status="SEARCHING", battery=72, assigned_sector="C"),
-        "DRONE-04": Drone(id="DRONE-04", position=[37.5, 5, 37.5], status="SEARCHING", battery=65, assigned_sector="D"),
+        "DRONE-01": Drone(id="DRONE-01", position=base_position.copy(), battery=95),
+        "DRONE-02": Drone(id="DRONE-02", position=base_position.copy(), battery=88),
+        "DRONE-03": Drone(id="DRONE-03", position=base_position.copy(), battery=72),
+        "DRONE-04": Drone(id="DRONE-04", position=base_position.copy(), battery=65),
     }
 
 
@@ -334,7 +335,7 @@ async def simulation_loop():
 
                 # SEARCHING - follow waypoints
                 if drone.status == "SEARCHING" and drone.assigned_sector:
-                    if drone_id not in waypoints or not waypoints[waypoints[drone_id]]:
+                    if drone_id not in waypoints or not waypoints[drone_id]:
                         waypoints[drone_id] = generate_lawnmower_waypoints(drone.assigned_sector)
                         waypoint_index[drone_id] = 0
 
@@ -580,24 +581,24 @@ async def agent_loop():
                 result = agent_result.output
 
                 # Print to terminal
-                print(f"\n{'='*50}")
+                print(f"\n\n{'='*50}")
                 print(f"AGENT ANALYSIS - {asyncio.get_event_loop().time():.1f}s")
                 if trigger_reason:
                     print(f"TRIGGERED: {trigger_reason}")
-                print(f"{'='*50}")
-                print(f"Risk Score: {result.risk_score:.2f}")
-                print(f"Action: {result.chosen_action}")
-                print(f"Battery: {result.battery_analysis}")
-                print(f"Reasoning: {result.internal_monologue[:200]}...")
+                print(f"{'='*50}\n")
+                print(f"Risk Score: {result.risk_score:.2f}\n")
+                print(f"Action: {result.chosen_action}\n")
+                print(f"Battery: {result.battery_analysis}\n")
+                print(f"Reasoning: {result.internal_monologue}")
 
                 # Log tool calls to frontend
                 if agent_result.tool_calls:
+                    print("\n[TOOL CALLS]")
                     for tc in agent_result.tool_calls:
                         tool_name = tc.get("tool", "unknown")
                         tool_args = tc.get("args", "")
-                        # Truncate args for display
-                        args_short = tool_args[:80] + "..." if len(tool_args) > 80 else tool_args
-                        add_log("REASONING", f"[TOOL CALL] {tool_name}({args_short})", "AGENT")
+                        print(f"  - {tool_name}({tool_args})")
+                        add_log("REASONING", f"[TOOL CALL] {tool_name}({tool_args})", "AGENT")
 
                 # Send logs to frontend (full reasoning, not truncated)
                 add_log("REASONING", f"[AGENT REASONING] {result.internal_monologue}", "AGENT")
@@ -675,7 +676,7 @@ async def broadcast_initial_state(websocket: WebSocket):
 @app.websocket("/ws/drone-control")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for drone control."""
-    global selected_drone_id
+    global selected_drone_id, drones, victims
 
     conn_id = str(id(websocket))
 
@@ -754,11 +755,19 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "sync_config":
                 config = message.get("config", {})
-                logger.info(f"Received setup config with {len(config.get('drones', []))} drones and {len(config.get('victims', []))} victims")
+                drone_count = len(config.get('drones', []))
+                victim_count = len(config.get('victims', []))
+                logger.info(f">>> Received sync_config: {drone_count} drones, {victim_count} victims")
+                logger.info(f"Drones: {[d.get('id') for d in config.get('drones', [])]}")
+                logger.info(f"Victims: {[v.get('id') for v in config.get('victims', [])]}")
 
                 # Reinitialize drones and victims from config
                 drones = {}
                 victims = {}
+
+                # Clear any previous state from DroneManager
+                drone_manager.clear_victims()
+                drone_manager.clear_drones()
 
                 # Process victims first and register in DroneManager grid
                 for v in config.get("victims", []):
@@ -798,6 +807,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     "drone_count": len(drones),
                     "victim_count": len(victims),
                 }))
+                logger.info(f">>> Sent config_ack to client")
 
             elif msg_type == "start_mission":
                 # Assign sectors to drones and start mission
