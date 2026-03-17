@@ -282,6 +282,48 @@ To add tests, consider:
 - `CHARGING`: At base, battery replenishing (+0.5%/500ms)
 - `SCANNING`: Not currently used in simulation
 
+### Fleet Optimization (DroneManager)
+
+The `DroneManager` class provides intelligent fleet deployment with battery-aware routing:
+
+#### Available Methods
+
+| Method | Description |
+|--------|-------------|
+| `get_fleet_status()` | Returns battery status for all drones |
+| `calculate_round_trip_distance(sector)` | Calculates distance from home base (0,0) to sector center and back |
+| `get_sectors_by_distance()` | Returns sectors sorted by distance from home base (furthest first) |
+| `optimize_fleet_deployment()` | Greedy matching algorithm with safety checks |
+| `command_return_to_base(drone_id)` | Commands a drone to return to base for charging |
+
+#### Round-Trip Distances
+
+| Sector | Center Position | Round-Trip Distance |
+|--------|-----------------|---------------------|
+| A | [12.5, 12.5] | ~35.4 units |
+| B | [37.5, 12.5] | ~80.3 units |
+| C | [12.5, 37.5] | ~80.3 units |
+| D | [37.5, 37.5] | ~106.3 units |
+
+#### Deployment Algorithm
+
+1. **Analyze Fleet**: Get available drones (battery > 40%)
+2. **Calculate Distance**: Find sectors furthest from home base
+3. **Greedy Matching**: Sort drones by battery (highest first), sectors by distance (furthest first)
+4. **Safety Check**: If round-trip distance > 80% of battery capacity, do NOT dispatch
+
+```python
+# Example usage
+result = drone_manager.optimize_fleet_deployment()
+# Returns: {
+#     "success": True,
+#     "message": "Deployed 4 drones successfully",
+#     "deployments": [...],
+#     "warnings": [...],
+#     "fleet_status": {...}
+# }
+```
+
 ### Mission Logic (in `page.tsx`)
 
 - **Autonomous dispatch**: 4 drones sent to sectors A-D on boot

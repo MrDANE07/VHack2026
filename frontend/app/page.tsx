@@ -88,29 +88,10 @@ function Dashboard({ config }: { config: SetupConfig }) {
     }
   }, [])
   
-  const logIdRef = useRef(0)
   const alertIdRef = useRef(0)
   const sectorAssignments = useRef<{ droneId: string; sector: string }[]>([])
   const dronesRef = useRef(drones)
   useEffect(() => { dronesRef.current = drones }, [drones])
-
-  // Add log entry (with deduplication)
-  const addLog = useCallback((type: LogEntry["type"], message: string, droneId?: string) => {
-    const sig = `${type}:${message}:${droneId}`
-    // Check if same log already exists in last 10 entries
-    setLogs((prev) => {
-      const recentSig = new Set(prev.slice(-10).map(l => `${l.type}:${l.message}:${l.droneId}`))
-      if (recentSig.has(sig)) return prev
-      const newLog: LogEntry = {
-        id: `log-${++logIdRef.current}`,
-        timestamp: new Date(),
-        type,
-        message,
-        droneId,
-      }
-      return [...prev, newLog]
-    })
-  }, [])
 
   // Find best replacement drone for handoff
   const findBestReplacementDrone = useCallback((
@@ -146,35 +127,26 @@ function Dashboard({ config }: { config: SetupConfig }) {
     const sectorKeys = ["A", "B", "C", "D"]
 
     const bootSequence = async () => {
-      addLog("SYSTEM", "AEGIS SWARM Mission Control initialized.")
       await delay(500)
-      addLog("SYSTEM", "Connecting to MCP server...")
       await delay(800)
-      addLog("SUCCESS", "MCP connection established. Discovering drone tools...")
       await delay(600)
 
       const onlineCount = config.drones.filter(d => d.online).length
-      addLog("SYSTEM", `${onlineCount} drones registered via MCP discovery. Tools: move_to(), thermal_scan(), return_home(), get_status()`)
       await delay(1000)
-      addLog("SYSTEM", "Mission instruction received: SEARCH AREA 7 FOR SURVIVORS")
       await delay(800)
 
-      addLog("REASONING", "Analyzing mission parameters...", "COMMAND")
       await delay(600)
-      addLog("REASONING", "Area 7 divided into 4 sectors (A, B, C, D). Assessing drone battery levels for dispatch.", "COMMAND")
       await delay(800)
 
       const sortedOnline = config.drones.filter(d => d.online).sort((a, b) => b.battery - a.battery)
 
       const lowBat = sortedOnline.filter(d => d.battery < SECTOR_ASSIGN_THRESHOLD)
       if (lowBat.length > 0) {
-        addLog("REASONING", `${lowBat.map(d => `${d.id} (${d.battery}%)`).join(", ")} — insufficient battery. Keeping at charging base.`, "COMMAND")
         await delay(600)
       }
 
       const offline = config.drones.filter(d => !d.online)
       if (offline.length > 0) {
-        addLog("REASONING", `${offline.map(d => d.id).join(", ")} — OFFLINE. Excluded from mission.`, "COMMAND")
         await delay(600)
       }
 
@@ -187,7 +159,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
       sectorAssignments.current = assignments.map(a => ({ droneId: a.droneId, sector: a.sector }))
 
       if (assignments.length > 0) {
-        addLog("REASONING", `Optimal dispatch: ${assignments.map(a => `${a.droneId}(${a.battery}%) -> Sector ${a.sector}`).join(", ")}`, "COMMAND")
         await delay(1000)
 
         setDrones(prev => prev.map(drone => {
@@ -203,19 +174,13 @@ function Dashboard({ config }: { config: SetupConfig }) {
           }
           return drone
         }))
-
-        for (const a of assignments) {
-          addLog("ACTION", `Dispatched to Sector ${a.sector}. Initiating thermal scan.`, a.droneId)
-        }
-      } else {
-        addLog("ALERT", "No drones available for dispatch. All drones are charging or offline.", "COMMAND")
       }
 
       setMissionStarted(true)
     }
 
     bootSequence()
-  }, [addLog, missionStarted, config])
+  }, [missionStarted, config])
 
   // WebSocket connection (graceful — backend may not be running yet)
   useEffect(() => {
@@ -448,11 +413,9 @@ function Dashboard({ config }: { config: SetupConfig }) {
                 newDrone.assignedSector = targetSector
                 newDrone.searchWaypoints = generateLawnmowerWaypoints(targetSector as keyof typeof SECTORS)
                 newDrone.searchPatternIndex = 0
-                addLog("SUCCESS", `Fully charged. Deploying to Sector ${targetSector}.`, drone.id)
                 return newDrone
               }
               newDrone.status = "IDLE"
-              addLog("SUCCESS", "Fully charged. All sectors covered — awaiting instructions.", drone.id)
             }
             newDrone.position = [...CHARGING_BASE]
             return newDrone
@@ -474,7 +437,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
               newDrone.position = [...CHARGING_BASE]
               newDrone.status = "CHARGING"
               newDrone.assignedSector = null
-              addLog("SUCCESS", "Arrived at charging base. Beginning charge cycle.", drone.id)
             } else {
               const speed = 1.5
               newDrone.position = [
@@ -490,36 +452,32 @@ function Dashboard({ config }: { config: SetupConfig }) {
           // TRACKING: Stay on victim position, drain battery
           if (drone.status === "TRACKING") {
             newDrone.battery = Math.max(0, drone.battery - 0.08)
-            
+
             // Check for critical battery during tracking - need MCP handoff
             if (newDrone.battery <= CRITICAL_BATTERY_THRESHOLD && drone.battery > CRITICAL_BATTERY_THRESHOLD) {
-              addLog("ALERT", `Battery critical (${newDrone.battery.toFixed(0)}%) while tracking victim! Requesting handoff via MCP.`, drone.id)
-              
+
               // Find replacement - command agent logic
               const replacement = findBestReplacementDrone(drone.id, drone.position, prev)
-              
+
               if (replacement) {
-                addLog("REASONING", `MCP handoff request received from ${drone.id}. Evaluating fleet...`, "COMMAND")
-                addLog("REASONING", `Best candidate: ${replacement.id} (${replacement.status}, ${replacement.battery.toFixed(0)}% battery). Dispatching for takeover.`, "COMMAND")
-                
+
                 // Schedule replacement dispatch
                 setTimeout(() => {
                   setDrones(d => d.map(dr => {
                     if (dr.id === replacement.id) {
                       const currentVictim = victims.find(v => v.trackingDroneId === drone.id)
-                      addLog("ACTION", `Taking over victim tracking from ${drone.id} at [${drone.position[0].toFixed(1)}, ${drone.position[2].toFixed(1)}]`, replacement.id)
-                      
+
                       // Update victim's tracking drone
                       if (currentVictim) {
-                        setVictims(v => v.map(vic => 
+                        setVictims(v => v.map(vic =>
                           vic.id === currentVictim.id ? { ...vic, trackingDroneId: replacement.id } : vic
                         ))
                       }
-                      
-                      return { 
-                        ...dr, 
-                        status: "TRACKING" as const, 
-                        position: [...drone.position], 
+
+                      return {
+                        ...dr,
+                        status: "TRACKING" as const,
+                        position: [...drone.position],
                         trackingVictimId: drone.trackingVictimId,
                         assignedSector: null
                       }
@@ -527,14 +485,11 @@ function Dashboard({ config }: { config: SetupConfig }) {
                     return dr
                   }))
                 }, 500)
-              } else {
-                addLog("ALERT", "No available drones for handoff! Victim may lose tracking.", "COMMAND")
               }
-              
+
               // Current drone returns to base
               newDrone.status = "RECALLING"
               newDrone.trackingVictimId = undefined
-              addLog("ACTION", "Handoff initiated. Returning to base for charging.", drone.id)
             }
             return newDrone
           }
@@ -548,7 +503,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
             const dist = Math.sqrt(dx * dx + dz * dz)
             if (dist < 2) {
               newDrone.status = "SEARCHING"
-              addLog("ACTION", `Arrived at Sector ${drone.assignedSector}. Initiating search pattern.`, drone.id)
             } else {
               const speed = 1.5
               newDrone.position = [
@@ -590,15 +544,12 @@ function Dashboard({ config }: { config: SetupConfig }) {
             // Check for low battery - RTB needed
             if (newDrone.battery <= LOW_BATTERY_THRESHOLD && drone.battery > LOW_BATTERY_THRESHOLD) {
               const currentSector = drone.assignedSector
-              addLog("ALERT", `Battery low (${newDrone.battery.toFixed(0)}%). Must return to base.`, drone.id)
-              addLog("REASONING", `${drone.id} battery critical. Initiating RTB protocol.`, "COMMAND")
-              
+
               newDrone.status = "RECALLING"
               newDrone.assignedSector = null
-              
+
               const replacement = prev.find(d => d.status === "IDLE" && d.battery > 50)
               if (replacement && currentSector) {
-                addLog("REASONING", `Sector ${currentSector} needs coverage. Dispatching ${replacement.id} (${replacement.battery.toFixed(0)}% battery).`, "COMMAND")
                 setTimeout(() => {
                   setDrones(d => d.map(dr => {
                     if (dr.id === replacement.id) {
@@ -613,7 +564,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
                     }
                     return dr
                   }))
-                  addLog("ACTION", `Dispatched to Sector ${currentSector}. Deploying...`, replacement.id)
                 }, 500)
               }
             }
@@ -627,7 +577,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
     }, 500)
 
     return () => clearInterval(interval)
-  }, [missionStarted, addLog, findBestReplacementDrone, victims])
+  }, [missionStarted, findBestReplacementDrone, victims])
 
   // Victim detection logic — reads dronesRef so the interval is stable
   useEffect(() => {
@@ -648,8 +598,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
           })
 
           if (detectingDrone) {
-            addLog("ALERT", `THERMAL SIGNATURE DETECTED at [${victim.position[0].toFixed(1)}, ${victim.position[2].toFixed(1)}]!`, detectingDrone.id)
-            addLog("REASONING", `${detectingDrone.id} thermal scan positive. Switching to TRACKING mode. Awaiting human dispatch order.`, "COMMAND")
 
             setDrones(prev => prev.map(d => {
               if (d.id === detectingDrone.id) {
@@ -663,8 +611,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
               }
               return d
             }))
-
-            addLog("ACTION", "Holding position over victim. Sending distress signal to command. Awaiting rescue team dispatch.", detectingDrone.id)
 
             const newAlert: VictimAlert = {
               id: `alert-${++alertIdRef.current}`,
@@ -690,7 +636,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
     }, 1000)
 
     return () => clearInterval(detectionInterval)
-  }, [missionStarted, addLog])
+  }, [missionStarted])
 
   // Rescue countdown timer - runs after human dispatches rescue team
   useEffect(() => {
@@ -706,51 +652,44 @@ function Dashboard({ config }: { config: SetupConfig }) {
         if (newCountdown <= 0) {
           // Rescue complete!
           const victim = victims.find(v => v.id === alert.victimId)
-          addLog("SUCCESS", `Rescue team has arrived! Victim at [${alert.coordinates[0].toFixed(1)}, ${alert.coordinates[2].toFixed(1)}] secured.`, alert.detectedBy)
-          
+
           // Mark victim as rescued
-          setVictims(v => v.map(vic => 
+          setVictims(v => v.map(vic =>
             vic.id === alert.victimId ? { ...vic, status: "RESCUED" as const, trackingDroneId: undefined } : vic
           ))
-          
+
           // Tracking drone: continue searching if battery sufficient, else RTB
           setDrones(d => d.map(drone => {
             if (drone.trackingVictimId === alert.victimId && drone.status === "TRACKING") {
               if (drone.battery > LOW_BATTERY_THRESHOLD) {
                 // Find a sector to search or go back to previous
-                const availableSector = Object.keys(SECTORS).find(s => 
+                const availableSector = Object.keys(SECTORS).find(s =>
                   !d.some(dr => dr.assignedSector === s && (dr.status === "SEARCHING" || dr.status === "DEPLOYING"))
                 )
-                
+
                 if (availableSector) {
-                  addLog("REASONING", `Rescue complete. ${drone.id} battery sufficient (${drone.battery.toFixed(0)}%). Deploying to Sector ${availableSector}.`, "COMMAND")
-                  addLog("ACTION", `Rescue mission complete. Deploying to Sector ${availableSector}.`, drone.id)
                   const wp = generateLawnmowerWaypoints(availableSector as keyof typeof SECTORS)
-                  return { 
-                    ...drone, 
-                    status: "DEPLOYING" as const, 
+                  return {
+                    ...drone,
+                    status: "DEPLOYING" as const,
                     trackingVictimId: undefined,
                     assignedSector: availableSector,
                     searchWaypoints: wp,
                     searchPatternIndex: findNearestWaypointIndex(drone.position, wp),
                   }
                 } else {
-                  addLog("REASONING", `All sectors covered. ${drone.id} returning to IDLE at base.`, "COMMAND")
-                  addLog("ACTION", `No sectors need coverage. Returning to base. Status: IDLE.`, drone.id)
-                  return { 
-                    ...drone, 
-                    status: "IDLE" as const, 
+                  return {
+                    ...drone,
+                    status: "IDLE" as const,
                     position: [...CHARGING_BASE],
                     trackingVictimId: undefined,
                     assignedSector: null
                   }
                 }
               } else {
-                addLog("REASONING", `Rescue complete. ${drone.id} battery low (${drone.battery.toFixed(0)}%). Initiating RTB.`, "COMMAND")
-                addLog("ACTION", `Rescue mission complete. Battery low - returning to base for charging.`, drone.id)
-                return { 
-                  ...drone, 
-                  status: "RECALLING" as const, 
+                return {
+                  ...drone,
+                  status: "RECALLING" as const,
                   trackingVictimId: undefined,
                   assignedSector: null
                 }
@@ -758,7 +697,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
             }
             return drone
           }))
-          
+
           return { ...alert, status: "RESCUED" as const, rescueCountdown: 0 }
         }
         
@@ -767,7 +706,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
     }, 1000)
 
     return () => clearInterval(rescueInterval)
-  }, [missionStarted, addLog])
+  }, [missionStarted])
 
   // Handle human operator clicking "Acknowledge and Dispatch"
   const handleDispatchRescue = useCallback((alertId: string) => {

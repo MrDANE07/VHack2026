@@ -315,11 +315,10 @@ export default function SetupWizard({ onComplete }: { onComplete: (config: Setup
     { id: "DRONE-02", online: true, battery: 88 },
     { id: "DRONE-03", online: true, battery: 72 },
     { id: "DRONE-04", online: true, battery: 65 },
-    { id: "DRONE-05", online: false, battery: 30 },
-    { id: "DRONE-06", online: false, battery: 15 },
   ])
 
-  const [victimCount, setVictimCount] = useState(4)
+  const [droneCount, setDroneCount] = useState(4)
+  const [victimCount, setVictimCount] = useState(6)
   const [victims, setVictims] = useState<{ id: string; position: [number, number, number] }[]>([])
 
   const onlineDrones = drones.filter((d) => d.online)
@@ -343,6 +342,26 @@ export default function SetupWizard({ onComplete }: { onComplete: (config: Setup
     setVictims((prev) => {
       const next = prev.filter((_, i) => i !== index)
       return next.map((v, i) => ({ ...v, id: `VIC-${String(i + 1).padStart(3, "0")}` }))
+    })
+  }, [])
+
+  const handleDroneCountChange = useCallback((count: number) => {
+    setDroneCount(count)
+    setDrones((prev) => {
+      if (prev.length > count) {
+        return prev.slice(0, count)
+      }
+      const newDrones = [...prev]
+      const sectors = ["A", "B", "C", "D", "E", "F"]
+      const batteries = [95, 88, 72, 65, 50, 40]
+      for (let i = prev.length; i < count; i++) {
+        newDrones.push({
+          id: `DRONE-${String(i + 1).padStart(2, "0")}`,
+          online: true,
+          battery: batteries[i] || 50,
+        })
+      }
+      return newDrones
     })
   }, [])
 
@@ -396,6 +415,23 @@ export default function SetupWizard({ onComplete }: { onComplete: (config: Setup
               <p className="font-mono text-xs text-muted-foreground">
                 Toggle drones online/offline and set battery levels for the mission.
               </p>
+            </div>
+
+            {/* Drone count control */}
+            <div className="flex items-center gap-6 mb-6">
+              <div className="flex items-center gap-3">
+                <span className="font-mono text-xs text-muted-foreground">DRONES:</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={6}
+                  value={droneCount}
+                  onChange={(e) => handleDroneCountChange(parseInt(e.target.value))}
+                  className="w-32 h-1.5 rounded-full appearance-none cursor-pointer"
+                  style={{ accentColor: "#22c55e" }}
+                />
+                <span className="font-mono text-sm font-bold text-chart-4">{droneCount}</span>
+              </div>
             </div>
 
             {/* Stats row */}

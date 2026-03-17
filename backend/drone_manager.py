@@ -78,18 +78,6 @@ class DroneManager:
                 battery=65,
                 assigned_sector="D"
             ),
-            "DRONE-05": Drone(
-                id="DRONE-05",
-                position=[0, 2, 0],
-                status="CHARGING",
-                battery=30
-            ),
-            "DRONE-06": Drone(
-                id="DRONE-06",
-                position=[0, 2, 0],
-                status="CHARGING",
-                battery=15
-            ),
         }
         logger.info(f"Initialized fleet with {len(self.drones)} drones")
         return self.drones
@@ -187,7 +175,6 @@ class DroneManager:
         if cell:
             cell.has_victim = True
             cell.victim_id = victim_id
-            logger.info(f"Victim {victim_id} detected at cell ({cell.x}, {cell.z})")
 
     def remove_victim(self, victim_id: str) -> None:
         """Remove a victim from the grid."""
@@ -224,19 +211,6 @@ class DroneManager:
         """Get a comprehensive world state summary for the agent."""
         grid_summary = self.get_grid_summary()
 
-        # Get known victims
-        victims = []
-        for cell in self.grid_map.values():
-            if cell.has_victim:
-                victims.append({
-                    "victim_id": cell.victim_id,
-                    "position": {
-                        "x": cell.x * self.CELL_SIZE + self.CELL_SIZE / 2,
-                        "z": cell.z * self.CELL_SIZE + self.CELL_SIZE / 2
-                    },
-                    "danger_level": cell.danger_level
-                })
-
         # Get sector assignments
         sectors = {}
         for drone_id, drone in self.drones.items():
@@ -259,7 +233,6 @@ class DroneManager:
                 "cell_size": self.CELL_SIZE,
                 "explored_percent": round(grid_summary["visited_percentage"], 1)
             },
-            "victims": victims,
             "sectors": sectors,
             "charging_base": {"x": 0, "z": 0},
             "drones": {
@@ -299,3 +272,169 @@ class DroneManager:
         if drone:
             drone.status = status
             logger.info(f"Drone {drone_id} status updated to {status}")
+
+    def calculate_round_trip_distance(self, sector: str) -> float:
+        """
+        Calculate round-trip distance from home base (0,0) to a sector center and back.
+
+        Args:
+            sector: Sector identifier (A, B, C, or D)
+
+        Returns:
+            Round-trip distance in world units
+        """
+        # Sector center positions from main.py
+        sector_centers = {
+            "A": [12.5, 12.5],
+            "B": [37.5, 12.5],
+            "C": [12.5, 37.5],
+            "D": [37.5, 37.5],
+        }
+
+        if sector not in sector_centers:
+            logger.warning(f"Unknown sector: {sector}")
+            return float('inf')
+
+        center = sector_centers[sector]
+        # Distance from home base (0,0) to sector center
+        distance_to_sector = (center[0] ** 2 + center[1] ** 2) ** 0.5
+        # Round-trip = to sector + back to base
+        round_trip = distance_to_sector * 2
+
+        logger.info(f"Sector {sector}: one-way={distance_to_sector:.1f}, round-trip={round_trip:.1f}")
+        return round_trip
+
+    def get_fleet_status(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get the battery status of all drones in the fleet.
+
+        Returns:
+            Dictionary mapping drone_id to battery and status info
+        """
+        return {
+            drone_id: {
+                "id": drone.id,
+                "battery": round(drone.battery, 1),
+                "status": drone.status,
+                "assigned_sector": drone.assigned_sector,
+                "position": {
+                    "x": round(drone.position[0], 1),
+                    "z": round(drone.position[2], 1)
+                }
+            }
+            for drone_id, drone in self.drones.items()
+        }
+
+    def get_sectors_by_distance(self) -> List[Tuple[str, float]]:
+        """
+        Get all sectors sorted by distance from home base (furthest first).
+
+        Returns:
+            List of (sector, distance) tuples sorted by distance (descending)
+        """
+        sectors_with_distance = []
+        for sector in ["A", "B", "C", "D"]:
+            distance = self.calculate_round_trip_distance(sector)
+            sectors_with_distance.append((sector, distance))
+
+        # Sort by distance descending (furthest first)
+        sectors_with_distance.sort(key=lambda x: -x[1])
+        return sectors_with_distance
+
+    def optimize_fleet_deployment(self) -> Dict[str, Any]:
+        """
+        Optimize fleet deployment using greedy matching with safety checks.
+
+        Algorithm:
+        1. Analyze fleet - get drone battery levels
+        2. Calculate distance - find sectors furthest from home base
+        3. Greedy matching - sort drones by battery (highest), sectors by distance (furthest)
+        4. Safety check - if round-trip > 80% of battery capacity, do NOT dispatch
+
+        Returns:
+            Dictionary with deployment plan and any safety warnings
+        """
+        # Step 1: Get available drones (battery > 40% and not charging/recalling)
+        available_drones = self.get_available_drones()
+
+        if not available_drones:
+            return {
+                "success": False,
+                "message": "No drones available for deployment",
+                "deployments": [],
+                "warnings": ["All drones are charging or have insufficient battery"]
+            }
+
+        # Step 2: Sort drones by battery (highest first)
+        sorted_drones = sorted(available_drones, key=lambda d: -d.battery)
+
+        # Step 3: Get sectors sorted by distance (furthest first)
+        sectors_by_distance = self.get_sectors_by_distance()
+
+        # Step 4: Greedy matching with safety check
+        deployments = []
+        warnings = []
+
+        for drone in sorted_drones:
+            # Calculate available battery capacity (80% of current battery)
+            battery_capacity = drone.battery * 0.8
+
+            # Find a suitable sector
+            assigned = False
+            for sector, distance in sectors_by_distance:
+                # Check if this sector is already assigned
+                if any(d["sector"] == sector for d in deployments):
+                    continue
+
+                # Safety check: can drone make round trip?
+                if distance <= battery_capacity:
+                    deployments.append({
+                        "drone_id": drone.id,
+                        "sector": sector,
+                        "round_trip_distance": round(distance, 1),
+                        "battery": round(drone.battery, 1),
+                        "battery_capacity_80": round(battery_capacity, 1),
+                        "safe": True
+                    })
+                    assigned = True
+                    break
+                else:
+                    # Sector too far for this drone
+                    warnings.append(
+                        f"{drone.id}: Cannot deploy to Sector {sector} - "
+                        f"round-trip {distance:.1f} exceeds 80% battery capacity ({battery_capacity:.1f})"
+                    )
+
+            if not assigned:
+                warnings.append(
+                    f"{drone.id}: No suitable sector available - remaining sectors too far"
+                )
+
+        # Determine if deployment was successful
+        successful_deployments = [d for d in deployments if d["safe"]]
+
+        return {
+            "success": len(successful_deployments) > 0,
+            "message": f"Deployed {len(successful_deployments)} drones successfully",
+            "deployments": successful_deployments,
+            "warnings": warnings,
+            "fleet_status": self.get_fleet_status()
+        }
+
+    def command_return_to_base(self, drone_id: str) -> bool:
+        """
+        Command a drone to return to base for charging.
+
+        Args:
+            drone_id: The ID of the drone to recall
+
+        Returns:
+            True if command was successful, False otherwise
+        """
+        drone = self.get_drone(drone_id)
+        if drone:
+            drone.status = "RECALLING"
+            drone.assigned_sector = None
+            logger.info(f"Commanded {drone_id} to return to base")
+            return True
+        return False

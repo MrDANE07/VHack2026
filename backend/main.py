@@ -53,6 +53,20 @@ RECALL_BATTERY_DRAIN = 0.05
 logs: list = []  # [{"type", "message", "droneId", "timestamp"}]
 alerts: list = []  # [{"id", "victimId", "position", "status", "droneId"}]
 
+
+def add_log(log_type: str, message: str, drone_id: str = None):
+    """Add a log entry (module-level function)."""
+    import asyncio
+    logs.append({
+        "type": log_type,
+        "message": message,
+        "droneId": drone_id,
+        "timestamp": asyncio.get_event_loop().time() if asyncio.get_event_loop().is_running() else 0
+    })
+    # Keep only last 100 logs
+    if len(logs) > 100:
+        logs.pop(0)
+
 # Agent trigger flag - set to True when user dispatches rescue to trigger agent response
 agent_trigger_event: asyncio.Event = None  # type: ignore
 
@@ -64,8 +78,6 @@ def create_initial_drones() -> Dict[str, Drone]:
         "DRONE-02": Drone(id="DRONE-02", position=[37.5, 5, 12.5], status="SEARCHING", battery=88, assigned_sector="B"),
         "DRONE-03": Drone(id="DRONE-03", position=[12.5, 5, 37.5], status="SEARCHING", battery=72, assigned_sector="C"),
         "DRONE-04": Drone(id="DRONE-04", position=[37.5, 5, 37.5], status="SEARCHING", battery=65, assigned_sector="D"),
-        "DRONE-05": Drone(id="DRONE-05", position=[0, 2, 0], status="CHARGING", battery=30),
-        "DRONE-06": Drone(id="DRONE-06", position=[0, 2, 0], status="CHARGING", battery=15),
     }
 
 
@@ -196,18 +208,6 @@ async def simulation_loop():
             z += spacing
 
         return pts
-
-    def add_log(log_type: str, message: str, drone_id: str = None):
-        """Add a log entry."""
-        logs.append({
-            "type": log_type,
-            "message": message,
-            "droneId": drone_id,
-            "timestamp": asyncio.get_event_loop().time()
-        })
-        # Keep only last 100 logs
-        if len(logs) > 100:
-            logs.pop(0)
 
     def get_covered_sectors() -> set:
         """Get sectors that have active drones."""
@@ -771,7 +771,6 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
                     # Register victim in DroneManager grid
                     drone_manager.add_victim(position[0], position[2], victim_id)
-                    logger.info(f"  Victim {victim_id} at [{position[0]}, {position[2]}]")
 
                 # Process drones and create them via DroneManager
                 online_drones = [d for d in config.get("drones", []) if d.get("online")]
@@ -802,28 +801,40 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif msg_type == "start_mission":
                 # Assign sectors to drones and start mission
+                logger.info(">>> Received start_mission message")
                 logger.info("Starting mission - assigning sectors")
 
-                # Sort drones by battery (highest first)
-                sorted_drones = sorted(
-                    [d for d in drones.values() if d.battery >= SECTOR_ASSIGN_THRESHOLD],
-                    key=lambda x: -x.battery
-                )
+                # Use drone_manager's optimize_fleet_deployment for intelligent assignment
+                # This assigns highest battery drones to furthest sectors with safety checks
+                # (checks if round-trip distance fits within 80% battery capacity)
+                deployment_result = drone_manager.optimize_fleet_deployment()
+                logger.info(f"Fleet optimization result: {deployment_result['message']}")
 
-                for i, drone in enumerate(sorted_drones):
-                    sector = SECTOR_ASSIGNMENTS[i % len(SECTOR_ASSIGNMENTS)]
-                    drone.assigned_sector = sector
-                    drone.status = "DEPLOYING"
-                    logger.info(f"  {drone.id} -> Sector {sector}")
+                # Apply deployments from optimization result
+                for deployment in deployment_result.get("deployments", []):
+                    drone_id = deployment["drone_id"]
+                    sector = deployment["sector"]
+                    if drone_id in drones:
+                        drones[drone_id].assigned_sector = sector
+                        drones[drone_id].status = "DEPLOYING"
+                        logger.info(f"  {drone_id} ({deployment['battery']}%) -> Sector {sector} (round-trip: {deployment['round_trip_distance']})")
+
+                # Log any warnings
+                for warning in deployment_result.get("warnings", []):
+                    logger.warning(f"Deployment warning: {warning}")
 
                 # Log deployment
-                for drone in sorted_drones:
-                    add_log("ACTION", f"Dispatched to Sector {drone.assigned_sector}. Initiating thermal scan.", drone.id)
+                deployed_count = 0
+                for deployment in deployment_result.get("deployments", []):
+                    drone_id = deployment["drone_id"]
+                    sector = deployment["sector"]
+                    add_log("ACTION", f"Dispatched to Sector {sector}. Initiating thermal scan.", drone_id)
+                    deployed_count += 1
 
                 await websocket.send_text(json.dumps({
                     "type": "mission_started",
                     "status": "success",
-                    "deployed_count": len(sorted_drones),
+                    "deployed_count": deployed_count,
                 }))
 
             elif msg_type == "rescue_dispatch":
