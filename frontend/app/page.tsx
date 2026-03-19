@@ -71,6 +71,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
   const [selectedDrone, setSelectedDrone] = useState<string | null>(null)
   const [missionStarted, setMissionStarted] = useState(false)
   const [wsConnected, setWsConnected] = useState(false)
+  const [configSynced, setConfigSynced] = useState(false)  // Track if backend has acknowledged config
   const [connectionStatus, setConnectionStatus] = useState({ websocket: false, lastPing: new Date() })
 
   // WebSocket ref
@@ -203,6 +204,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
         retryDelay = 2000
         hasLoggedFailure = false
         setWsConnected(true)
+        setConfigSynced(false)  // Reset config sync state on reconnect
         setConnectionStatus({ websocket: true, lastPing: new Date() })
       }
 
@@ -248,7 +250,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
               setLogs(prev => {
                 // Create a Set of existing log signatures to avoid duplicates
                 const existingSigs = new Set(prev.map(l => `${l.type}:${l.message}:${l.droneId}`))
-                const newLogs = message.logs
+                const newLogs: LogEntry[] = message.logs
                   .map((l: any, i: number) => ({
                     id: `log-${Date.now()}-${i}`,
                     timestamp: new Date(),
@@ -256,7 +258,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
                     message: l.message,
                     droneId: l.droneId,
                   }))
-                  .filter(l => !existingSigs.has(`${l.type}:${l.message}:${l.droneId}`))
+                  .filter((l): l is LogEntry => !existingSigs.has(`${l.type}:${l.message}:${l.droneId}`))
                 return [...prev, ...newLogs].slice(-100)
               })
             }
@@ -274,6 +276,12 @@ function Dashboard({ config }: { config: SetupConfig }) {
             }
           }
 
+          // Handle config acknowledgment from backend
+          if (message.type === "config_ack") {
+            console.log("[AEGIS] Received config_ack from backend:", message)
+            setConfigSynced(true)
+          }
+
           if (message.type === "mission_started") {
             setMissionStarted(true)
           }
@@ -284,6 +292,7 @@ function Dashboard({ config }: { config: SetupConfig }) {
 
       ws.onclose = () => {
         setWsConnected(false)
+        setConfigSynced(false)  // Reset config sync state on disconnect
         setConnectionStatus({ websocket: false, lastPing: new Date() })
         if (!disposed) {
           if (!hasLoggedFailure) {
@@ -313,18 +322,49 @@ function Dashboard({ config }: { config: SetupConfig }) {
 
   // Send setup config to backend when WebSocket connects
   useEffect(() => {
-    if (!wsConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
-    wsRef.current.send(JSON.stringify({
-      type: "sync_config",
-      config: { drones: config.drones, victims: config.victims },
-    }))
+    if (!wsConnected || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.log("[AEGIS] Skipping config sync - WebSocket not ready:", { wsConnected, readyState: wsRef.current?.readyState })
+      return
+    }
+
+    // Add a small delay to ensure WebSocket is fully ready
+    const sendConfig = () => {
+      // Only send online drones to backend
+      const onlineDrones = config.drones.filter((d: { online: boolean }) => d.online)
+      const configMessage = JSON.stringify({
+        type: "sync_config",
+        config: { drones: onlineDrones, victims: config.victims },
+      })
+
+      console.log("[AEGIS] Sending config to backend:", { droneCount: onlineDrones.length, victimCount: config.victims.length })
+
+      try {
+        wsRef.current?.send(configMessage)
+        console.log("[AEGIS] Config sent successfully")
+      } catch (error) {
+        console.error("[AEGIS] Failed to send config:", error)
+        // Retry after a short delay
+        setTimeout(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            console.log("[AEGIS] Retrying config send...")
+            wsRef.current?.send(configMessage)
+          }
+        }, 1000)
+      }
+    }
+
+    // Small delay to ensure WebSocket is ready, then send
+    const timer = setTimeout(sendConfig, 200)
+    return () => clearTimeout(timer)
   }, [wsConnected, config])
 
-  // Send start_mission to backend when mission starts
+  // Send start_mission to backend when mission starts (after config is synced)
   useEffect(() => {
-    if (!missionStarted || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    console.log("[AEGIS] start_mission check:", { missionStarted, configSynced, wsOpen: wsRef.current?.readyState === WebSocket.OPEN })
+    if (!missionStarted || !configSynced || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return
+    console.log("[AEGIS] Sending start_mission to backend")
     wsRef.current.send(JSON.stringify({ type: "start_mission" }))
-  }, [missionStarted])
+  }, [missionStarted, configSynced])
 
   useEffect(() => {
   // Guard: Ensure we have a socket and a drone selected
