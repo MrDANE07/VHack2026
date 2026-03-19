@@ -1,5 +1,6 @@
 "use client"
 
+import { useEffect, useRef } from "react"
 import { ScrollArea } from "@/components/ui/scroll-area"
 
 export interface LogEntry {
@@ -28,8 +29,14 @@ function formatTime(date: Date): string {
 }
 
 export default function MissionLog({ logs }: { logs: LogEntry[] }) {
-  // Reverse logs so newest is at top
-  const reversedLogs = [...logs].reverse()
+  const scrollRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom when new logs are added
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollIntoView({ behavior: "smooth" })
+    }
+  }, [logs])
 
   return (
     <div className="h-full flex flex-col bg-card border-r border-border">
@@ -51,17 +58,17 @@ export default function MissionLog({ logs }: { logs: LogEntry[] }) {
         </p>
       </div>
 
-      {/* Log content - newest at top */}
-      <ScrollArea className="flex-1 tactical-scrollbar">
-        <div className="p-3 space-y-2">
-          {reversedLogs.map((log, index) => {
+      {/* Log content - newest at bottom */}
+      <ScrollArea className="flex-1 h-0 tactical-scrollbar">
+        <div className="p-3 space-y-2 min-h-full">
+          {logs.map((log, index) => {
             const style = typeStyles[log.type]
             return (
               <div
                 key={log.id}
-                className="font-mono text-xs leading-relaxed"
+                className="font-mono text-xs leading-relaxed break-all"
               >
-                <div className="flex items-start gap-2">
+                <div className="flex items-start gap-2 flex-nowrap">
                   <span className="text-muted-foreground shrink-0">
                     [{formatTime(log.timestamp)}]
                   </span>
@@ -69,7 +76,7 @@ export default function MissionLog({ logs }: { logs: LogEntry[] }) {
                     [{style.label}]
                   </span>
                 </div>
-                <div className="pl-0 mt-0.5 text-foreground/90">
+                <div className="pl-0 mt-0.5 text-foreground/90 break-words">
                   {log.droneId && (
                     <span className="text-chart-1">[{log.droneId}] </span>
                   )}
@@ -79,7 +86,8 @@ export default function MissionLog({ logs }: { logs: LogEntry[] }) {
             )
           })}
 
-          {/* Cursor blink */}
+          {/* Auto-scroll anchor and cursor */}
+          <div ref={scrollRef} />
           <div className="flex items-center gap-1 mt-2">
             <span className="text-chart-4 font-mono text-xs">{">"}</span>
             <span className="w-2 h-4 bg-chart-4 animate-pulse" />
