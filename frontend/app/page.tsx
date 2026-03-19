@@ -76,7 +76,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
 
   // WebSocket ref
   const wsRef = useRef<WebSocket | null>(null)
-  const pressedKeysRef = useRef<Set<string>>(new Set())
 
   // Wrapper for setSelectedDrone that also notifies backend
   const handleSelectDrone = useCallback((droneId: string | null) => {
@@ -224,7 +223,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
                   battery: backendDrone.battery,
                   assignedSector: backendDrone.assignedSector,
                   trackingVictimId: backendDrone.trackingVictimId,
-                  manualMode: backendDrone.manualMode,
                 }
               }
               return drone
@@ -251,14 +249,14 @@ function Dashboard({ config }: { config: SetupConfig }) {
                 // Create a Set of existing log signatures to avoid duplicates
                 const existingSigs = new Set(prev.map(l => `${l.type}:${l.message}:${l.droneId}`))
                 const newLogs: LogEntry[] = message.logs
-                  .map((l: any, i: number) => ({
+                  .map((l: { type: string; message: string; droneId?: string }, i: number) => ({
                     id: `log-${Date.now()}-${i}`,
                     timestamp: new Date(),
                     type: l.type as LogEntry["type"],
                     message: l.message,
                     droneId: l.droneId,
                   }))
-                  .filter((l): l is LogEntry => !existingSigs.has(`${l.type}:${l.message}:${l.droneId}`))
+                  .filter((l: { type: any; message: any; droneId: any }) => !existingSigs.has(`${l.type}:${l.message}:${l.droneId ?? ""}`))
                 return [...prev, ...newLogs].slice(-100)
               })
             }
@@ -366,60 +364,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
     wsRef.current.send(JSON.stringify({ type: "start_mission" }))
   }, [missionStarted, configSynced])
 
-  useEffect(() => {
-  // Guard: Ensure we have a socket and a drone selected
-  if (!wsRef.current || !selectedDrone) return;
-
-  const validKeys = ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "w", "W", "s", "S", "a", "A", "d", "D"];
-
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (!validKeys.includes(e.key)) return;
-
-    // Prevent scrolling for arrow keys
-    if (e.key.startsWith("Arrow")) e.preventDefault();
-
-    const isSocketReady = wsRef.current?.readyState === WebSocket.OPEN;
-
-    if (isSocketReady && !pressedKeysRef.current.has(e.key)) {
-      pressedKeysRef.current.add(e.key);
-      wsRef.current?.send(JSON.stringify({
-        type: "keydown",
-        key: e.key,
-        droneId: selectedDrone,
-      }));
-    }
-  };
-
-  const handleKeyUp = (e: KeyboardEvent) => {
-    if (!validKeys.includes(e.key)) return;
-
-    const isSocketReady = wsRef.current?.readyState === WebSocket.OPEN;
-
-    // Only send if the key was actually tracked and socket is live
-    if (pressedKeysRef.current.has(e.key)) {
-      pressedKeysRef.current.delete(e.key);
-      
-      if (isSocketReady) {
-        wsRef.current?.send(JSON.stringify({
-          type: "keyup",
-          key: e.key,
-          droneId: selectedDrone,
-        }));
-      }
-    }
-  };
-
-  window.addEventListener("keydown", handleKeyDown);
-  window.addEventListener("keyup", handleKeyUp);
-
-  return () => {
-    window.removeEventListener("keydown", handleKeyDown);
-    window.removeEventListener("keyup", handleKeyUp);
-    // Important: Clear tracking so keys don't "stick" if the effect re-runs
-    pressedKeysRef.current.clear();
-  };
-}, [selectedDrone]); // Effect re-syncs when drone target changes
-
   // Main simulation loop - drone movement and battery management
   useEffect(() => {
     if (!missionStarted) return
@@ -427,11 +371,6 @@ function Dashboard({ config }: { config: SetupConfig }) {
     const interval = setInterval(() => {
       setDrones(prev => {
         const updated = prev.map(drone => {
-          // Skip manual drones - backend handles their movement
-          if (drone.status === "MANUAL" || drone.manualMode) {
-            return { ...drone, lastSeen: new Date() }
-          }
-
           let newDrone = { ...drone, lastSeen: new Date() }
 
           // CHARGING: Increase battery at base, then deploy to an uncovered sector

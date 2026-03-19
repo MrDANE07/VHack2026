@@ -7,7 +7,7 @@ import { AlertTriangle, Battery, Wifi, MapPin, Zap } from "lucide-react"
 export interface DroneStatus {
   id: string
   position: [number, number, number]
-  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING" | "MANUAL"
+  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING"
   battery: number
   target?: [number, number, number]
   connected: boolean
@@ -15,7 +15,6 @@ export interface DroneStatus {
   conflictWarning?: boolean
   assignedSector?: string | null
   trackingVictimId?: string
-  manualMode?: boolean
   searchPatternIndex?: number
   searchWaypoints?: [number, number, number][]
 }
@@ -28,7 +27,6 @@ const statusConfig: Record<string, { color: string; bgColor: string; label: stri
   IDLE: { color: "text-muted-foreground", bgColor: "bg-muted/50 border-muted-foreground/30", label: "IDLE" },
   CHARGING: { color: "text-chart-4", bgColor: "bg-chart-4/20 border-chart-4/50", label: "CHARGING" },
   DEPLOYING: { color: "text-cyan-400", bgColor: "bg-cyan-400/20 border-cyan-400/50", label: "DEPLOYING" },
-  MANUAL: { color: "text-purple-400", bgColor: "bg-purple-400/20 border-purple-400/50", label: "MANUAL" },
 }
 
 function DroneCard({
