@@ -180,6 +180,7 @@ async def get_deployment_status() -> str:
 
     Returns:
     - Which sectors are covered by active drones
+    - Which sectors are fully searched (95%+ explored) - DO NOT assign drones here
     - Which sectors are uncovered and need drones
     - Available drones for deployment
     - Recommended deployment strategy based on battery and distance
@@ -188,6 +189,7 @@ async def get_deployment_status() -> str:
     coverage = drone_manager.get_drone_sector_coverage_status()
     available = drone_manager.get_available_drones()
     sectors_by_distance = drone_manager.get_sectors_by_distance(reverse=False)
+    fully_searched = drone_manager.get_fully_searched_sectors()
 
     # Calculate recommended deployments
     recommendations = []
@@ -208,6 +210,7 @@ async def get_deployment_status() -> str:
     return json.dumps({
         "sector_coverage": coverage,
         "uncovered_sectors": uncovered,
+        "fully_searched_sectors": list(fully_searched),
         "available_drones": [d.id for d in available],
         "recommendations": recommendations,
         "strategy": "nearest_sectors" if len(available) < len(uncovered) else "furthest_sectors" if available else "none"
@@ -260,6 +263,27 @@ async def deploy_to_sector(drone_id: str, sector: str) -> str:
             "current_status": drone.status
         }, indent=2)
 
+    # Check if sector is already covered by another drone
+    covered_sectors = {
+        d.assigned_sector for d in drone_manager.get_all_drones().values()
+        if d.assigned_sector and d.status in ["SEARCHING", "DEPLOYING", "TRACKING"] and d.id != drone_id
+    }
+    if sector in covered_sectors:
+        return json.dumps({
+            "error": f"Sector {sector} is already covered by another drone",
+            "covered_by": list(covered_sectors),
+            "action": "Use a different sector or wait for current search to complete"
+        }, indent=2)
+
+    # Check if sector is fully searched
+    fully_searched = drone_manager.get_fully_searched_sectors()
+    if sector in fully_searched:
+        return json.dumps({
+            "error": f"Sector {sector} is already fully searched (95%+ explored)",
+            "exploration": "95%+",
+            "action": "Use a different sector or use deploy_to_sector_resume for interrupted search"
+        }, indent=2)
+
     # Calculate round-trip distance for battery check
     round_trip = drone_manager.calculate_round_trip_distance(sector)
     battery_needed = round_trip * 0.5
@@ -294,6 +318,114 @@ async def deploy_to_sector(drone_id: str, sector: str) -> str:
         },
         "battery": round(drone.battery, 1),
         "message": f"Deployed to sector {sector}"
+    }, indent=2)
+
+
+@mcp.tool()
+async def deploy_to_sector_resume(drone_id: str, sector: str) -> str:
+    """
+    Deploy a drone to continue searching a sector from where the previous drone left off.
+
+    Use this when a drone returned due to low battery and another drone needs to
+    continue the search from the last searched position.
+
+    Args:
+        drone_id: The drone to deploy
+        sector: The sector to continue searching (A, B, C, or D)
+
+    Returns:
+        Deployment confirmation with resume position or error
+    """
+    # Validate drone
+    drone = drone_manager.get_drone(drone_id)
+    if not drone:
+        return json.dumps({
+            "error": f"Drone {drone_id} not found",
+            "available_drones": list(drone_manager.get_all_drones().keys())
+        }, indent=2)
+
+    # Validate sector
+    valid_sectors = ["A", "B", "C", "D"]
+    if sector not in valid_sectors:
+        return json.dumps({
+            "error": f"Invalid sector {sector}",
+            "valid_sectors": valid_sectors
+        }, indent=2)
+
+    # Check battery
+    if drone.battery < MIN_BATTERY_DEPLOYMENT:
+        return json.dumps({
+            "error": f"Insufficient battery to deploy",
+            "drone_id": drone_id,
+            "current_battery": round(drone.battery, 1),
+            "minimum_required": MIN_BATTERY_DEPLOYMENT,
+            "action": f"Return to base for charging (battery < {MIN_BATTERY_DEPLOYMENT}%)"
+        }, indent=2)
+
+    # Check if sector is already fully searched (don't resume if complete)
+    fully_searched = drone_manager.get_fully_searched_sectors()
+    if sector in fully_searched:
+        return json.dumps({
+            "error": f"Sector {sector} is already fully searched (95%+ explored)",
+            "exploration": "95%+",
+            "action": "No need to resume - sector is complete"
+        }, indent=2)
+
+    # Get resume point
+    resume_point = drone_manager.get_sector_resume_point(sector)
+
+    if not resume_point:
+        # No resume point - start fresh
+        return json.dumps({
+            "error": f"No resume point found for sector {sector}",
+            "action": "Use deploy_to_sector instead to start fresh search",
+            "sector": sector
+        }, indent=2)
+
+    # Deploy drone
+    drone.assigned_sector = sector
+    drone.status = "SEARCHING"  # Go directly to searching mode
+    drone._resume_mode = True  # Flag to indicate this is a resume deployment
+
+    # Calculate start position based on resume point
+    # Resume from the stored z_row and determine x based on direction
+    z_row = resume_point.get("z_row", 2)
+    x_direction = resume_point.get("x_direction", 1)
+    waypoint_idx = resume_point.get("waypoint_index", 0)
+
+    # Determine starting X position based on direction
+    sector_bounds = {
+        "A": (0, 25),
+        "B": (25, 50),
+        "C": (0, 25),
+        "D": (25, 50)
+    }
+    min_x, max_x = sector_bounds[sector]
+    padding = 2
+
+    if x_direction == 1:
+        start_x = min_x + padding  # Start from left, go right
+    else:
+        start_x = max_x - padding  # Start from right, go left
+
+    drone.position = [start_x, 5, z_row]
+
+    await broadcast_drone_state()
+
+    return json.dumps({
+        "success": True,
+        "drone_id": drone_id,
+        "sector": sector,
+        "status": "SEARCHING",
+        "resume_mode": True,
+        "start_position": {
+            "x": round(start_x, 1),
+            "z": round(z_row, 1)
+        },
+        "direction": "right" if x_direction == 1 else "left",
+        "previous_waypoint_index": waypoint_idx,
+        "battery": round(drone.battery, 1),
+        "message": f"Continuing search in sector {sector} from z={z_row:.0f}, direction={'right' if x_direction == 1 else 'left'}"
     }, indent=2)
 
 
@@ -590,6 +722,51 @@ async def start_thermal_scan(drone_id: str) -> str:
 
 
 @mcp.tool()
+async def get_sector_progress(sector: str) -> str:
+    """
+    Get detailed progress of a sector including exploration percentage and resume point.
+
+    Returns:
+        - Exploration percentage
+        - Whether sector is fully searched
+        - Resume point (if search was interrupted)
+        - Recommended action based on progress
+
+    Use this before deploying a drone to decide whether to start fresh or resume.
+    """
+    valid_sectors = ["A", "B", "C", "D"]
+    if sector not in valid_sectors:
+        return json.dumps({"error": f"Invalid sector {sector}", "valid_sectors": valid_sectors}, indent=2)
+
+    grid_manager = drone_manager.grid_manager
+    sector_summary = grid_manager.get_sector_summary()
+    sector_data = sector_summary.get(sector, {"explored": 0, "total": 625, "percentage": 0.0})
+    resume_point = drone_manager.get_sector_resume_point(sector)
+
+    # Determine status and recommendation
+    if sector_data["percentage"] >= 95.0:
+        status = "FULLY_SEARCHED"
+        recommendation = "Do not deploy - sector is fully searched"
+    elif resume_point:
+        status = "INTERRUPTED"
+        recommendation = f"Use deploy_to_sector_resume to continue from z={resume_point.get('z_row', 0):.0f}"
+    else:
+        status = "NOT_STARTED"
+        recommendation = "Use deploy_to_sector to start fresh search"
+
+    return json.dumps({
+        "sector": sector,
+        "explored": sector_data["explored"],
+        "total": sector_data["total"],
+        "percentage": sector_data["percentage"],
+        "status": status,
+        "has_resume_point": resume_point is not None,
+        "resume_point": resume_point,
+        "recommendation": recommendation
+    }, indent=2)
+
+
+@mcp.tool()
 async def get_sector_status(sector: str) -> str:
     """
     Get detailed status of a specific sector.
@@ -652,23 +829,18 @@ async def get_grid_exploration() -> str:
     - Total exploration percentage
     - Per-sector exploration details
     - Which sectors are fully explored
+    - Resume points for interrupted searches
     """
     grid_manager = drone_manager.grid_manager
     sector_summary = grid_manager.get_sector_summary()
     grid_summary = drone_manager.get_grid_summary()
+    sector_progress = drone_manager.get_sector_progress()
 
     fully_explored = [s for s, data in sector_summary.items() if data["percentage"] >= 99.0]
 
     return json.dumps({
         "total_exploration": round(grid_summary["visited_percentage"], 1),
-        "sectors": {
-            sector: {
-                "explored": data["explored"],
-                "total": data["total"],
-                "percentage": data["percentage"]
-            }
-            for sector, data in sector_summary.items()
-        },
+        "sectors": sector_progress,
         "fully_explored_sectors": fully_explored,
         "needs_coverage": [s for s in ["A", "B", "C", "D"] if s not in fully_explored]
     }, indent=2)

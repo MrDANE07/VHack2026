@@ -24,6 +24,9 @@ victims: Dict[str, Dict[str, Any]] = {}  # victim_id -> {position, detected}
 active_connections: Set[WebSocket] = set()
 selected_drone_id: Optional[str] = None
 
+# Client connection tracking for reset on new connections
+last_client_id: Optional[str] = None
+
 # Sector assignments for drones
 SECTOR_POSITIONS = {
     "A": [12.5, 5, 12.5],
@@ -150,6 +153,90 @@ app.add_middleware(
 )
 
 
+# Module-level helper functions for use by agent_loop
+def generate_lawnmower_waypoints(sector: str) -> list:
+    """Generate lawnmower pattern waypoints for a sector."""
+    bounds = {
+        "A": (0, 25, 0, 25),
+        "B": (25, 50, 0, 25),
+        "C": (0, 25, 25, 50),
+        "D": (25, 50, 25, 50),
+    }
+    min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
+
+    pts = []
+    padding = 2
+    spacing = 4
+    z = min_z + padding
+    going_right = True
+
+    while z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
+
+    return pts
+
+
+def generate_lawnmower_waypoints_from(sector: str, start_z: float, x_direction: int = 1) -> list:
+    """
+    Generate lawnmower pattern waypoints for a sector, starting from a specific Z row.
+
+    Args:
+        sector: Sector ID (A, B, C, or D)
+        start_z: The Z row to start searching from
+        x_direction: 1 to start going right, -1 to start going left
+
+    Returns:
+        List of [x, y, z] waypoints
+    """
+    bounds = {
+        "A": (0, 25, 0, 25),
+        "B": (25, 50, 0, 25),
+        "C": (0, 25, 25, 50),
+        "D": (25, 50, 25, 50),
+    }
+    min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
+
+    pts = []
+    padding = 2
+    spacing = 4
+
+    # Start from the resume Z row
+    z = start_z
+    # Determine initial direction based on x_direction
+    going_right = (x_direction == 1)
+
+    while z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
+
+    # If we started in the middle, also add the rows before start_z
+    z = min_z + padding
+    while z < start_z and z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
+
+    return pts
+
+
 async def simulation_loop():
     """
     Main simulation loop running at 2Hz (500ms interval).
@@ -160,34 +247,6 @@ async def simulation_loop():
     # Waypoint tracking per drone
     waypoints: Dict[str, list] = {}
     waypoint_index: Dict[str, int] = {}
-
-    def generate_lawnmower_waypoints(sector: str) -> list:
-        """Generate lawnmower pattern waypoints for a sector."""
-        bounds = {
-            "A": (0, 25, 0, 25),
-            "B": (25, 50, 0, 25),
-            "C": (0, 25, 25, 50),
-            "D": (25, 50, 25, 50),
-        }
-        min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
-
-        pts = []
-        padding = 2
-        spacing = 4
-        z = min_z + padding
-        going_right = True
-
-        while z < max_z - padding:
-            if going_right:
-                pts.append([max_x - padding, 5, z])
-                pts.append([min_x + padding, 5, z])
-            else:
-                pts.append([min_x + padding, 5, z])
-                pts.append([max_x - padding, 5, z])
-            going_right = not going_right
-            z += spacing
-
-        return pts
 
     def get_covered_sectors() -> set:
         """Get sectors that have active drones."""
@@ -336,7 +395,26 @@ async def simulation_loop():
 
                 # SEARCHING - follow waypoints
                 if drone.status == "SEARCHING" and drone.assigned_sector:
-                    if drone_id not in waypoints or not waypoints[drone_id]:
+                    # Check if this is a resume deployment (drone started at a middle position)
+                    is_resume = hasattr(drone, '_resume_mode') and drone._resume_mode
+
+                    if is_resume:
+                        # Generate waypoints starting from the resume Z position
+                        if drone_id not in waypoints or not waypoints[drone_id]:
+                            resume_point = drone_manager.get_sector_resume_point(drone.assigned_sector)
+                            if resume_point:
+                                start_z = resume_point.get("z_row", 2)
+                                direction = resume_point.get("x_direction", 1)
+                                waypoints[drone_id] = generate_lawnmower_waypoints_from(
+                                    drone.assigned_sector, start_z, direction
+                                )
+                                waypoint_index[drone_id] = 0
+                                add_log("ACTION", f"Resuming search in sector {drone.assigned_sector} from z={start_z}", drone_id)
+                            else:
+                                waypoints[drone_id] = generate_lawnmower_waypoints(drone.assigned_sector)
+                                waypoint_index[drone_id] = 0
+                            drone._resume_mode = False  # Clear the flag
+                    elif drone_id not in waypoints or not waypoints[drone_id]:
                         waypoints[drone_id] = generate_lawnmower_waypoints(drone.assigned_sector)
                         waypoint_index[drone_id] = 0
 
@@ -377,6 +455,26 @@ async def simulation_loop():
 
                     # Low battery - initiate RTB
                     if drone.battery <= LOW_BATTERY_THRESHOLD:
+                        # Store resume point before returning
+                        if drone.assigned_sector and drone_id in waypoints:
+                            wp_list = waypoints[drone_id]
+                            idx = waypoint_index.get(drone_id, 0)
+                            current_z = drone.position[2]
+                            # Determine direction based on current position relative to waypoint
+                            x_direction = 1  # default: next drone starts going right
+                            if idx < len(wp_list):
+                                next_wp = wp_list[idx]
+                                if next_wp[0] < drone.position[0]:
+                                    x_direction = -1
+                            # Store resume point in drone_manager
+                            drone_manager.update_sector_resume_point(
+                                drone.assigned_sector,
+                                current_z,
+                                idx,
+                                x_direction
+                            )
+                            add_log("REASONING", f"Resume point stored for sector {drone.assigned_sector}: z={current_z:.0f}, waypoint_idx={idx}", drone_id)
+
                         drone.status = "RECALLING"
                         add_log("ALERT", f"Low battery ({drone.battery:.0f}%). Returning to base.", drone_id)
 
@@ -637,13 +735,32 @@ async def agent_loop():
                             action_executed = True
 
                         elif result.chosen_action == "deploy_to_sector" and result.target_sector:
-                            # Execute deploy_to_sector action
-                            drone.assigned_sector = result.target_sector
-                            drone.status = "DEPLOYING"
-                            waypoints[result.target_drone_id] = generate_lawnmower_waypoints(result.target_sector)
-                            waypoint_index[result.target_drone_id] = 0
-                            add_log("ACTION", f"Executing: DEPLOY {result.target_drone_id} to Sector {result.target_sector}", "AGENT")
-                            action_executed = True
+                            # Validate before deploying
+                            target_sector = result.target_sector
+
+                            # Check if drone is already deployed to this sector
+                            if drone.assigned_sector == target_sector and drone.status in ["SEARCHING", "DEPLOYING"]:
+                                add_log("REASONING", f"Skipping: {result.target_drone_id} already deployed to Sector {target_sector}", "AGENT")
+                                action_executed = True  # Mark as handled, just skip
+                            # Check if sector is already covered by another drone
+                            elif target_sector in {
+                                d.assigned_sector for d in drones.values()
+                                if d.assigned_sector and d.status in ["SEARCHING", "DEPLOYING", "TRACKING"] and d.id != result.target_drone_id
+                            }:
+                                add_log("REASONING", f"Skipping: Sector {target_sector} already covered by another drone", "AGENT")
+                                action_executed = True
+                            # Check if sector is fully searched
+                            elif target_sector in drone_manager.get_fully_searched_sectors():
+                                add_log("REASONING", f"Skipping: Sector {target_sector} is already fully searched (95%+ explored)", "AGENT")
+                                action_executed = True
+                            else:
+                                # Execute deploy_to_sector action
+                                drone.assigned_sector = target_sector
+                                drone.status = "DEPLOYING"
+                                waypoints[result.target_drone_id] = generate_lawnmower_waypoints(target_sector)
+                                waypoint_index[result.target_drone_id] = 0
+                                add_log("ACTION", f"Executing: DEPLOY {result.target_drone_id} to Sector {target_sector}", "AGENT")
+                                action_executed = True
 
                         elif result.chosen_action == "thermal_scan":
                             # Execute thermal scan (immediate check for victims)
@@ -738,12 +855,30 @@ async def broadcast_initial_state(websocket: WebSocket):
 @app.websocket("/ws/drone-control")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for drone control."""
-    global selected_drone_id, drones, victims
+    global selected_drone_id, drones, victims, last_client_id, logs, alerts
 
     conn_id = str(id(websocket))
+    client_id = conn_id  # Each connection gets a unique ID
 
     await websocket.accept()
     active_connections.add(websocket)
+
+    # Check if this is a new client (page refresh) - reset all state
+    is_new_client = last_client_id is None or last_client_id != client_id
+    if is_new_client:
+        logger.info(f"New client connected ({client_id}) - resetting backend state")
+        # Reset all backend state for fresh start
+        drones = {}
+        victims = {}
+        logs = []
+        alerts = []
+        # Clear DroneManager state
+        if drone_manager:
+            drone_manager.clear_victims()
+            drone_manager.clear_drones()
+        last_client_id = client_id
+    else:
+        logger.info(f"Reconnecting client: {conn_id}")
 
     logger.info(f"Client connected: {conn_id}")
 
@@ -894,6 +1029,9 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Client disconnected: {conn_id}")
         active_connections.discard(websocket)
+        # If no more connections, reset for next client
+        if not active_connections:
+            logger.info("No active connections - backend will reset on next client connect")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         active_connections.discard(websocket)

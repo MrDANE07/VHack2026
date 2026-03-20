@@ -2,7 +2,18 @@
 
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Badge } from "@/components/ui/badge"
-import { AlertTriangle, Battery, Wifi, MapPin, Zap } from "lucide-react"
+import { AlertTriangle, Battery, Wifi, MapPin, Zap, Crosshair } from "lucide-react"
+
+// Calculate current sector from position (x, z coordinates)
+// Sectors: A (NW: x<25, z<25), B (NE: x>=25, z<25), C (SW: x<25, z>=25), D (SE: x>=25, z>=25)
+function getCurrentSector(x: number, z: number): string | null {
+  if (x < 0 || x > 50 || z < 0 || z > 50) return null
+  if (x < 25) {
+    return z < 25 ? "A" : "C"
+  } else {
+    return z < 25 ? "B" : "D"
+  }
+}
 
 export interface DroneStatus {
   id: string
@@ -120,12 +131,27 @@ function DroneCard({
           </span>
         </div>
         
-        {/* Sector assignment */}
-        {drone.assignedSector && (
-          <div className="flex items-center gap-1.5 col-span-2">
-            <span className="text-xs text-chart-1">SECTOR {drone.assignedSector}</span>
-          </div>
-        )}
+        {/* Sector info - show both assigned and current position-based sector */}
+        {(() => {
+          const currentSector = getCurrentSector(drone.position[0], drone.position[2])
+          const isMismatch = drone.assignedSector && currentSector && drone.assignedSector !== currentSector
+          return (
+            <div className="flex items-center gap-1.5 col-span-2">
+              <Crosshair className={`w-3.5 h-3.5 ${isMismatch ? "text-chart-3" : "text-chart-1"}`} />
+              {drone.assignedSector && (
+                <span className={`text-xs ${isMismatch ? "text-chart-3" : "text-chart-1"}`}>
+                  ASSIGNED: {drone.assignedSector}
+                </span>
+              )}
+              {currentSector && (
+                <span className={`text-xs ${isMismatch ? "text-destructive font-bold" : "text-muted-foreground"}`}>
+                  {drone.assignedSector ? ` | AT: ${currentSector}` : `SECTOR ${currentSector}`}
+                  {isMismatch && " (MISMATCH!)"}
+                </span>
+              )}
+            </div>
+          )
+        })()}
         
         {/* Tracking indicator */}
         {drone.status === "TRACKING" && drone.trackingVictimId && (

@@ -373,6 +373,9 @@ class DroneManager:
         self.grid_map: Dict[Tuple[int, int], GridCell] = {}
         self.grid_manager: GridManager = GridManager()  # 2,500 point grid
         self.selected_drone_id: Optional[str] = None
+        # Track last searched position per sector (for resuming interrupted searches)
+        # Format: {sector_id: {"z": last_z_row, "waypoint_index": last_index, "x_direction": 1 or -1}}
+        self._sector_resume_points: Dict[str, Dict[str, Any]] = {}
         self._initialize_grid()
 
     def _initialize_grid(self) -> None:
@@ -565,6 +568,7 @@ class DroneManager:
         # Get sector coverage status
         sector_coverage = self.get_drone_sector_coverage_status()
         uncovered_sectors = self.get_uncovered_sectors()
+        fully_searched = self.get_fully_searched_sectors()
 
         return {
             "grid": {
@@ -575,6 +579,7 @@ class DroneManager:
             "sectors": sectors,
             "sector_coverage": sector_coverage,
             "uncovered_sectors": uncovered_sectors,
+            "fully_searched_sectors": list(fully_searched),
             "charging_base": {"x": 0, "z": 0},
             "victims": grid_victims,
             "drones": {
@@ -689,19 +694,105 @@ class DroneManager:
 
     def get_uncovered_sectors(self) -> List[str]:
         """
-        Get list of sectors that have no drone currently assigned/ searching.
+        Get list of sectors that:
+        1. Have no drone currently assigned/ searching AND
+        2. Are not fully searched (explored)
 
         Returns:
-            List of sector IDs that are not covered
+            List of sector IDs that are not covered and not fully searched
         """
         covered_sectors = set()
         for drone in self.drones.values():
             if drone.assigned_sector and drone.status in ["DEPLOYING", "SEARCHING", "TRACKING"]:
                 covered_sectors.add(drone.assigned_sector)
 
+        # Get sectors that are fully explored (searched)
+        fully_searched = self.get_fully_searched_sectors()
+
         all_sectors = {"A", "B", "C", "D"}
-        uncovered = list(all_sectors - covered_sectors)
+        # Exclude both covered and fully searched sectors
+        uncovered = list(all_sectors - covered_sectors - fully_searched)
         return uncovered
+
+    def get_fully_searched_sectors(self, threshold: float = 95.0) -> set:
+        """
+        Get sectors that have been fully searched (explored).
+
+        Args:
+            threshold: Percentage of grid points that must be explored (default 95%)
+
+        Returns:
+            Set of sector IDs that are fully searched
+        """
+        sector_summary = self.grid_manager.get_sector_summary()
+        fully_searched = set()
+
+        for sector, stats in sector_summary.items():
+            if stats["percentage"] >= threshold:
+                fully_searched.add(sector)
+
+        return fully_searched
+
+    def update_sector_resume_point(self, sector: str, z_row: float, waypoint_index: int = 0, x_direction: int = 1) -> None:
+        """
+        Store the last search position for a sector when a drone returns early.
+
+        Args:
+            sector: Sector ID (A, B, C, or D)
+            z_row: The last Z row the drone was searching
+            waypoint_index: The last waypoint index
+            x_direction: 1 if moving right, -1 if moving left (for next drone)
+        """
+        self._sector_resume_points[sector] = {
+            "z_row": z_row,
+            "waypoint_index": waypoint_index,
+            "x_direction": x_direction,
+            "last_drone_id": None  # Will be set by caller
+        }
+        logger.info(f"Stored resume point for sector {sector}: z_row={z_row}, waypoint_index={waypoint_index}, direction={x_direction}")
+
+    def get_sector_resume_point(self, sector: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the resume point for a sector.
+
+        Args:
+            sector: Sector ID (A, B, C, or D)
+
+        Returns:
+            Dict with z_row, waypoint_index, x_direction or None if no resume point
+        """
+        return self._sector_resume_points.get(sector)
+
+    def clear_sector_resume_point(self, sector: str) -> None:
+        """Clear the resume point for a sector (when search is complete)."""
+        if sector in self._sector_resume_points:
+            del self._sector_resume_points[sector]
+            logger.info(f"Cleared resume point for sector {sector}")
+
+    def get_sector_progress(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get progress information for all sectors including exploration percentage and resume points.
+
+        Returns:
+            Dict mapping sector ID to progress info (explored %, resume point, etc.)
+        """
+        sector_summary = self.grid_manager.get_sector_summary()
+        progress = {}
+
+        for sector in ["A", "B", "C", "D"]:
+            stats = sector_summary.get(sector, {"explored": 0, "total": 625, "percentage": 0.0})
+            resume_point = self._sector_resume_points.get(sector)
+
+            progress[sector] = {
+                "explored": stats["explored"],
+                "total": stats["total"],
+                "percentage": stats["percentage"],
+                "is_fully_searched": stats["percentage"] >= 95.0,
+                "has_resume_point": resume_point is not None,
+                "resume_point": resume_point
+            }
+
+        return progress
 
     def get_drone_sector_coverage_status(self) -> Dict[str, bool]:
         """

@@ -40,7 +40,7 @@ A full-stack application demonstrating **autonomous agentic drone swarm operatio
 │                              │                                   │   │
 │                              ▼                                   │   │
 │  ┌─────────────────────────────────────────────────────────┐    │   │
-│  │              Fleet: 6 Autonomous Drones                  │    │   │
+│  │              Fleet: 4 Autonomous Drones                  │    │   │
 │  │  States: IDLE │ SEARCHING │ TRACKING │ RECALLING │ CHARGING │   │
 │  └─────────────────────────────────────────────────────────┘    │   │
 └─────────────────────────────────────────────────────────────────────┘
@@ -155,18 +155,20 @@ async def agent_loop():
 
 ### MCP Tools (Model Context Protocol)
 
-The agent has 8 tools available for drone control:
+The agent has 10 tools available for drone control:
 
 | Tool | Purpose |
 |------|---------|
 | `move_drone()` | Navigate drone to target position |
 | `thermal_scan()` | Scan area for thermal signatures |
-| `verify_target()` | Confirm victim detection |
+| `deploy_to_sector()` | Deploy drone to start fresh search in sector |
+| `deploy_to_sector_resume()` | Continue search from where previous drone left off |
+| `get_sector_progress()` | Check sector status (NOT_STARTED/INTERRUPTED/FULLY_SEARCHED) |
+| `get_grid_exploration()` | Get overall exploration status with resume points |
+| `get_deployment_status()` | Get coverage status and recommendations |
 | `return_to_base()` | Command RTB for charging |
-| `evaluate_fleet()` | Get full fleet status |
-| `get_drone_status()` | Query single drone state |
-| `assign_sector()` | Deploy drone to search sector |
-| `abort_mission()` | Emergency stop all operations |
+| `get_fleet_overview()` | Get full fleet status |
+| `get_battery_status()` | Query single drone battery state |
 
 ### Battery Safety Logic
 
@@ -191,6 +193,59 @@ The agent enforces strict battery constraints:
 2. Round-trip requirement (×2)
 3. Safety margin (+15%)
 4. If `battery < total_needed`: refuse action, recommend RTB
+
+### Sector Tracking & Resume Functionality
+
+The agent tracks sector search progress to avoid redundant deployments:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                 SECTOR STATE MANAGEMENT                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Three Sector States:                                          │
+│  ┌─────────────────┐  ┌─────────────────┐  ┌─────────────────┐ │
+│  │  NOT_STARTED    │  │  INTERRUPTED    │  │ FULLY_SEARCHED  │ │
+│  │  - No drone yet │  │ - Resume point  │  │ 95%+ explored   │ │
+│  │  - Deploy fresh │  │ - Resume from   │  │ - Skip this     │ │
+│  │                 │  │   last position │  │   sector        │ │
+│  └─────────────────┘  └─────────────────┘  └─────────────────┘ │
+│                                                                 │
+│  When drone returns due to low battery:                        │
+│  1. Store resume point (Z row, waypoint index, direction)      │
+│  2. Next drone uses deploy_to_sector_resume()                  │
+│  3. Continues from exact position where previous left off       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Resume Point Storage:**
+- When a drone returns to base due to low battery (< 20%), the system stores:
+  - `z_row`: The last Z row being searched
+  - `waypoint_index`: The last waypoint index
+  - `x_direction`: Direction for next drone (1=right, -1=left)
+
+**Agent Decision Flow:**
+```python
+# Before deploying, check sector status
+sector_status = get_sector_progress("A")
+# Returns: {percentage: 45.2, status: "INTERRUPTED", resume_point: {...}}
+
+if sector_status["status"] == "FULLY_SEARCHED":
+    # Skip - sector is complete
+elif sector_status["has_resume_point"]:
+    # Use deploy_to_sector_resume to continue
+    deploy_to_sector_resume(drone_id="DRONE-01", sector="A")
+else:
+    # Start fresh search
+    deploy_to_sector(drone_id="DRONE-01", sector="A")
+```
+
+**Validation Before Deployment:**
+The agent validates before any deployment:
+1. Is the drone already deployed to this sector? → Skip
+2. Is another drone already covering this sector? → Skip
+3. Is the sector fully searched (95%+)? → Skip
 
 ---
 
