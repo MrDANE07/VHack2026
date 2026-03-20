@@ -42,7 +42,19 @@ class MissionThought(BaseModel):
     )
     chosen_action: str = Field(
         description="The specific action to take: move_drone, thermal_scan, verify_target, "
-        "return_to_base, evaluate_fleet, or wait"
+        "return_to_base, deploy_to_sector, evaluate_fleet, or wait"
+    )
+    target_drone_id: Optional[str] = Field(
+        description="The ID of the drone to control (e.g., 'drone-1', 'drone-2')"
+    )
+    target_x: Optional[float] = Field(
+        description="Target X coordinate for move_drone action (0-50)"
+    )
+    target_z: Optional[float] = Field(
+        description="Target Z coordinate for move_drone action (0-50)"
+    )
+    target_sector: Optional[str] = Field(
+        description="Target sector for deploy_to_sector (A, B, C, or D)"
     )
     risk_score: float = Field(
         description="Risk assessment from 0.0 (safe) to 1.0 (critical), considering battery, "
@@ -92,7 +104,19 @@ You don't need to explicitly notify the frontend - the system handles that. Your
 be on making good tactical decisions.
 
 Your goal is to maximize victim detection while ensuring no drone is stranded
-due to battery depletion. Coordinate the fleet strategically."""
+due to battery depletion. Coordinate the fleet strategically.
+
+OUTPUT FORMAT - When you respond, you MUST provide:
+- chosen_action: The action to take (move_drone, thermal_scan, return_to_base, deploy_to_sector, evaluate_fleet, or wait)
+- target_drone_id: The drone ID to control (e.g., "drone-1", "drone-2")
+- target_x: X coordinate (0-50) for move_drone action
+- target_z: Z coordinate (0-50) for move_drone action
+- target_sector: Sector (A, B, C, or D) for deploy_to_sector action
+- internal_monologue: Your reasoning
+- battery_analysis: Battery feasibility analysis
+- risk_score: Risk from 0.0 to 1.0
+
+Available drone IDs: drone-1, drone-2, drone-3, drone-4 (check actual available drones from fleet status)"""
 
 
 # Configure MCP server to connect to backend/mcp_server.py

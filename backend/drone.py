@@ -10,11 +10,14 @@ class Drone:
 
     id: str
     position: List[float] = field(default_factory=lambda: [0, 2, 0])
+    target_position: Optional[List[float]] = None
     status: str = "IDLE"
     battery: float = 100.0
     connected: bool = True
     assigned_sector: Optional[str] = None
     tracking_victim_id: Optional[str] = None
+    search_waypoint_index: int = 0
+    search_direction: int = 1
 
     # Movement bounds
     MIN_X: float = 0
@@ -53,6 +56,7 @@ class Drone:
         return {
             "id": self.id,
             "position": self.position,
+            "targetPosition": self.target_position,
             "status": self.status,
             "battery": self.battery,
             "connected": self.connected,

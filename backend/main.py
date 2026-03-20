@@ -287,6 +287,29 @@ async def simulation_loop():
                     drone.battery = max(0, drone.battery - RECALL_BATTERY_DRAIN)
                     continue
 
+                # MOVING - move to target position (agent-controlled)
+                if drone.status == "MOVING" and drone.target_position:
+                    tx, ty, tz = drone.target_position
+                    dx = tx - drone.position[0]
+                    dz = tz - drone.position[2]
+                    dist = (dx * dx + dz * dz) ** 0.5
+
+                    if dist < 2:
+                        # Arrived at target
+                        drone.position = [tx, ty, tz]
+                        drone.status = "SEARCHING"  # Switch to search after reaching target
+                        drone.target_position = None
+                        add_log("ACTION", f"Arrived at target position ({tx}, {tz}). Switching to search mode.", drone_id)
+                    else:
+                        speed = SEARCH_SPEED
+                        drone.position = [
+                            drone.position[0] + (dx / dist) * speed,
+                            ty,
+                            drone.position[2] + (dz / dist) * speed,
+                        ]
+                    drone.battery = max(0, drone.battery - SEARCH_BATTERY_DRAIN)
+                    continue
+
                 # DEPLOYING - move to first waypoint
                 if drone.status == "DEPLOYING" and drone.assigned_sector:
                     if drone_id not in waypoints or not waypoints[drone_id]:
@@ -594,10 +617,58 @@ async def agent_loop():
                         print(f"  - {tool_name}({tool_args})")
                         add_log("REASONING", f"[TOOL CALL] {tool_name}({tool_args})", "AGENT")
 
+                # Execute agent's chosen action
+                action_executed = False
+                if result.chosen_action and result.target_drone_id:
+                    drone = drones.get(result.target_drone_id)
+                    if drone:
+                        if result.chosen_action == "move_drone" and result.target_x is not None and result.target_z is not None:
+                            # Execute move_drone action
+                            drone.target_position = [result.target_x, 5, result.target_z]
+                            drone.status = "MOVING"
+                            add_log("ACTION", f"Executing: MOVE {result.target_drone_id} to ({result.target_x}, {result.target_z})", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "return_to_base":
+                            # Execute return_to_base action
+                            drone.status = "RECALLING"
+                            drone.assigned_sector = None
+                            add_log("ACTION", f"Executing: RETURN_TO_BASE {result.target_drone_id}", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "deploy_to_sector" and result.target_sector:
+                            # Execute deploy_to_sector action
+                            drone.assigned_sector = result.target_sector
+                            drone.status = "DEPLOYING"
+                            waypoints[result.target_drone_id] = generate_lawnmower_waypoints(result.target_sector)
+                            waypoint_index[result.target_drone_id] = 0
+                            add_log("ACTION", f"Executing: DEPLOY {result.target_drone_id} to Sector {result.target_sector}", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "thermal_scan":
+                            # Execute thermal scan (immediate check for victims)
+                            current_x = int(drone.position[0])
+                            current_z = int(drone.position[2])
+                            grid_manager = drone_manager.grid_manager
+                            discovered = grid_manager.check_and_discover_victims(current_x, current_z)
+                            if discovered:
+                                for v in discovered:
+                                    add_log("ALERT", f"VICTIM DETECTED by {result.target_drone_id} at ({v.get('x')}, {v.get('z')})", "AGENT")
+                            add_log("ACTION", f"Executing: THERMAL_SCAN on {result.target_drone_id}", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "evaluate_fleet":
+                            # Just log, no action needed
+                            add_log("ACTION", f"Executing: EVALUATE_FLEET - fleet status reviewed", "AGENT")
+                            action_executed = True
+
                 # Send logs to frontend (full reasoning, not truncated)
                 add_log("REASONING", f"[AGENT REASONING] {result.internal_monologue}", "AGENT")
                 add_log("REASONING", f"[BATTERY] {result.battery_analysis}", "AGENT")
-                add_log("ACTION", f"Recommended: {result.chosen_action.upper()} (risk: {result.risk_score:.2f})", "AGENT")
+                action_str = f"{result.chosen_action.upper()} (risk: {result.risk_score:.2f})"
+                if action_executed:
+                    action_str += " [EXECUTED]"
+                add_log("ACTION", f"Recommended: {action_str}", "AGENT")
 
                 # Broadcast updated state (includes new logs)
                 await broadcast_drone_state()

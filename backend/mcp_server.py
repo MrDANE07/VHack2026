@@ -351,6 +351,245 @@ async def return_to_base(drone_id: str) -> str:
 
 
 @mcp.tool()
+async def move_drone(drone_id: str, x: float, z: float) -> str:
+    """
+    Move a drone to a specific position.
+
+    Used for:
+    - Directing drone to a specific location
+    - Repositioning during search
+    - Moving to investigate areas
+
+    Returns confirmation or error if movement is not possible.
+    """
+    drone = drone_manager.get_drone(drone_id)
+
+    if not drone:
+        return json.dumps({
+            "error": f"Drone {drone_id} not found",
+            "available_drones": list(drone_manager.get_all_drones().keys())
+        }, indent=2)
+
+    # Validate coordinates
+    if not (0 <= x <= 50 and 0 <= z <= 50):
+        return json.dumps({
+            "error": f"Coordinates out of bounds. Must be 0-50.",
+            "requested": {"x": x, "z": z}
+        }, indent=2)
+
+    # Calculate distance and battery needed
+    current_x, _, current_z = drone.position
+    distance = calculate_distance(current_x, current_z, x, z)
+    battery_needed = distance * 0.5
+
+    # Check battery (need enough for movement + 15% safety margin)
+    if drone.battery < battery_needed + 15:
+        return json.dumps({
+            "error": "Insufficient battery for movement",
+            "drone_id": drone_id,
+            "current_battery": round(drone.battery, 1),
+            "battery_needed": round(battery_needed + 15, 1),
+            "action": "return_to_base or wait for charging"
+        }, indent=2)
+
+    # Set target position (will be moved toward in simulation loop)
+    drone.target_position = [x, 5, z]
+    drone.status = "MOVING"
+
+    # Consume battery
+    drone.battery = max(0, drone.battery - battery_needed)
+
+    await broadcast_drone_state()
+
+    return json.dumps({
+        "success": True,
+        "drone_id": drone_id,
+        "action": "moving_to_target",
+        "target_position": {"x": x, "y": 5, "z": z},
+        "status": "MOVING",
+        "distance": round(distance, 2),
+        "battery_used": round(battery_needed, 1),
+        "remaining_battery": round(drone.battery, 1)
+    }, indent=2)
+
+
+@mcp.tool()
+async def set_drone_status(drone_id: str, status: str) -> str:
+    """
+    Set a drone's status directly.
+
+    Valid statuses:
+    - IDLE: At charging base
+    - CHARGING: Recharging at base
+    - SEARCHING: Lawnmower pattern search
+    - TRACKING: Stationary over victim
+    - RECALLING: Returning to base
+
+    Returns confirmation or error.
+    """
+    valid_statuses = ["IDLE", "CHARGING", "SEARCHING", "TRACKING", "RECALLING", "DEPLOYING", "MOVING"]
+
+    drone = drone_manager.get_drone(drone_id)
+
+    if not drone:
+        return json.dumps({
+            "error": f"Drone {drone_id} not found",
+            "available_drones": list(drone_manager.get_all_drones().keys())
+        }, indent=2)
+
+    if status not in valid_statuses:
+        return json.dumps({
+            "error": f"Invalid status {status}",
+            "valid_statuses": valid_statuses,
+            "current_status": drone.status
+        }, indent=2)
+
+    old_status = drone.status
+    drone.status = status
+
+    await broadcast_drone_state()
+
+    return json.dumps({
+        "success": True,
+        "drone_id": drone_id,
+        "old_status": old_status,
+        "new_status": status,
+        "battery": round(drone.battery, 1),
+        "position": {
+            "x": round(drone.position[0], 1),
+            "y": round(drone.position[1], 1),
+            "z": round(drone.position[2], 1)
+        }
+    }, indent=2)
+
+
+@mcp.tool()
+async def set_search_pattern(drone_id: str, sector: str) -> str:
+    """
+    Start a lawnmower search pattern in a sector.
+
+    The drone will systematically search the sector grid in a boustrophedon pattern.
+
+    Returns confirmation or error.
+    """
+    valid_sectors = ["A", "B", "C", "D"]
+
+    drone = drone_manager.get_drone(drone_id)
+
+    if not drone:
+        return json.dumps({
+            "error": f"Drone {drone_id} not found",
+            "available_drones": list(drone_manager.get_all_drones().keys())
+        }, indent=2)
+
+    if sector not in valid_sectors:
+        return json.dumps({
+            "error": f"Invalid sector {sector}",
+            "valid_sectors": valid_sectors
+        }, indent=2)
+
+    # Check battery (need at least 40% for search mission)
+    if drone.battery < 40:
+        return json.dumps({
+            "error": "Insufficient battery for search mission",
+            "drone_id": drone_id,
+            "current_battery": round(drone.battery, 1),
+            "required_battery": 40,
+            "action": "return_to_base or wait for charging"
+        }, indent=2)
+
+    # Set drone to search mode in sector
+    drone.assigned_sector = sector
+    drone.status = "SEARCHING"
+
+    # Get sector bounds and set initial waypoint
+    sector_bounds = drone_manager.get_sector_bounds(sector)
+    min_x, max_x, min_z, max_z = sector_bounds
+
+    # Start at sector entry point
+    drone.target_position = [min_x, 5, min_z]
+    drone.search_waypoint_index = 0
+    drone.search_direction = 1  # 1 = positive X, -1 = negative X
+
+    await broadcast_drone_state()
+
+    return json.dumps({
+        "success": True,
+        "drone_id": drone_id,
+        "action": "searching",
+        "sector": sector,
+        "status": "SEARCHING",
+        "sector_bounds": {
+            "min_x": min_x, "max_x": max_x,
+            "min_z": min_z, "max_z": max_z
+        },
+        "start_position": {"x": min_x, "y": 5, "z": min_z},
+        "battery": round(drone.battery, 1)
+    }, indent=2)
+
+
+@mcp.tool()
+async def start_thermal_scan(drone_id: str) -> str:
+    """
+    Trigger a thermal scan at the drone's current position.
+
+    The drone will scan for heat signatures (victims) in its vicinity.
+
+    Returns scan results or confirmation.
+    """
+    drone = drone_manager.get_drone(drone_id)
+
+    if not drone:
+        return json.dumps({
+            "error": f"Drone {drone_id} not found",
+            "available_drones": list(drone_manager.get_all_drones().keys())
+        }, indent=2)
+
+    # Consume battery for scan
+    scan_battery_cost = 3.0
+    if drone.battery < scan_battery_cost:
+        return json.dumps({
+            "error": "Insufficient battery for thermal scan",
+            "drone_id": drone_id,
+            "current_battery": round(drone.battery, 1),
+            "required_battery": scan_battery_cost
+        }, indent=2)
+
+    drone.battery = max(0, drone.battery - scan_battery_cost)
+
+    # Check for victims at current position
+    current_x = int(drone.position[0])
+    current_z = int(drone.position[2])
+
+    grid_manager = drone_manager.grid_manager
+    discovered = grid_manager.check_and_discover_victims(current_x, current_z)
+
+    victims_found = []
+    for v in discovered:
+        victims_found.append({
+            "id": v.get("id"),
+            "x": v.get("x"),
+            "z": v.get("z")
+        })
+
+    await broadcast_drone_state()
+
+    return json.dumps({
+        "success": True,
+        "drone_id": drone_id,
+        "action": "thermal_scan",
+        "scan_position": {
+            "x": round(drone.position[0], 1),
+            "z": round(drone.position[2], 1)
+        },
+        "battery_used": scan_battery_cost,
+        "remaining_battery": round(drone.battery, 1),
+        "victims_found": victims_found,
+        "victim_count": len(victims_found)
+    }, indent=2)
+
+
+@mcp.tool()
 async def get_sector_status(sector: str) -> str:
     """
     Get detailed status of a specific sector.
