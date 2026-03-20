@@ -562,6 +562,10 @@ class DroneManager:
 
         # Note: Agent has NO knowledge of undiscovered victims - they must find them through searching
 
+        # Get sector coverage status
+        sector_coverage = self.get_drone_sector_coverage_status()
+        uncovered_sectors = self.get_uncovered_sectors()
+
         return {
             "grid": {
                 "size": self.GRID_SIZE,
@@ -569,6 +573,8 @@ class DroneManager:
                 "explored_percent": round(grid_summary["visited_percentage"], 1)
             },
             "sectors": sectors,
+            "sector_coverage": sector_coverage,
+            "uncovered_sectors": uncovered_sectors,
             "charging_base": {"x": 0, "z": 0},
             "victims": grid_victims,
             "drones": {
@@ -661,21 +667,54 @@ class DroneManager:
             for drone_id, drone in self.drones.items()
         }
 
-    def get_sectors_by_distance(self) -> List[Tuple[str, float]]:
+    def get_sectors_by_distance(self, reverse: bool = True) -> List[Tuple[str, float]]:
         """
-        Get all sectors sorted by distance from home base (furthest first).
+        Get all sectors sorted by distance from home base.
+
+        Args:
+            reverse: If True (default), sort by distance descending (furthest first).
+                    If False, sort by distance ascending (nearest first).
 
         Returns:
-            List of (sector, distance) tuples sorted by distance (descending)
+            List of (sector, distance) tuples sorted by distance
         """
         sectors_with_distance = []
         for sector in ["A", "B", "C", "D"]:
             distance = self.calculate_round_trip_distance(sector)
             sectors_with_distance.append((sector, distance))
 
-        # Sort by distance descending (furthest first)
-        sectors_with_distance.sort(key=lambda x: -x[1])
+        # Sort by distance
+        sectors_with_distance.sort(key=lambda x: x[1], reverse=reverse)
         return sectors_with_distance
+
+    def get_uncovered_sectors(self) -> List[str]:
+        """
+        Get list of sectors that have no drone currently assigned/ searching.
+
+        Returns:
+            List of sector IDs that are not covered
+        """
+        covered_sectors = set()
+        for drone in self.drones.values():
+            if drone.assigned_sector and drone.status in ["DEPLOYING", "SEARCHING", "TRACKING"]:
+                covered_sectors.add(drone.assigned_sector)
+
+        all_sectors = {"A", "B", "C", "D"}
+        uncovered = list(all_sectors - covered_sectors)
+        return uncovered
+
+    def get_drone_sector_coverage_status(self) -> Dict[str, bool]:
+        """
+        Get coverage status for each sector.
+
+        Returns:
+            Dict mapping sector ID to bool (True if covered, False otherwise)
+        """
+        coverage = {sector: False for sector in ["A", "B", "C", "D"]}
+        for drone in self.drones.values():
+            if drone.assigned_sector and drone.status in ["DEPLOYING", "SEARCHING", "TRACKING"]:
+                coverage[drone.assigned_sector] = True
+        return coverage
 
     def optimize_fleet_deployment(self) -> Dict[str, Any]:
         """
@@ -683,9 +722,11 @@ class DroneManager:
 
         Algorithm:
         1. Analyze fleet - get drone battery levels
-        2. Calculate distance - find sectors furthest from home base
-        3. Greedy matching - sort drones by battery (highest), sectors by distance (furthest)
-        4. Safety check - if round-trip > 80% of battery capacity, do NOT dispatch
+        2. Get uncovered sectors
+        3. If drones < uncovered sectors: prioritize NEAREST sectors, assign highest
+           battery drone to furthest among those nearest sectors
+        4. If drones >= uncovered sectors: assign highest battery drones to furthest sectors
+        5. Safety check - must have > 40% battery to deploy
 
         Returns:
             Dictionary with deployment plan and any safety warnings
@@ -701,32 +742,59 @@ class DroneManager:
                 "warnings": ["All drones are charging or have insufficient battery"]
             }
 
-        # Step 2: Sort drones by battery (highest first)
+        # Step 2: Get uncovered sectors (no drone currently searching)
+        uncovered_sectors = self.get_uncovered_sectors()
+
+        if not uncovered_sectors:
+            return {
+                "success": False,
+                "message": "All sectors already covered",
+                "deployments": [],
+                "warnings": ["No uncovered sectors available"],
+                "fleet_status": self.get_fleet_status()
+            }
+
+        # Step 3: Sort drones by battery (highest first)
         sorted_drones = sorted(available_drones, key=lambda d: -d.battery)
 
-        # Step 3: Get sectors sorted by distance (furthest first)
-        sectors_by_distance = self.get_sectors_by_distance()
+        # Step 4: Determine sector prioritization strategy
+        num_drones = len(sorted_drones)
+        num_sectors = len(uncovered_sectors)
 
-        # Step 4: Greedy matching - highest battery drone to furthest sector
+        if num_drones < num_sectors:
+            # When drones < sectors: prioritize NEAREST sectors
+            # Get sectors sorted by distance ascending (nearest first)
+            sectors_by_distance = self.get_sectors_by_distance(reverse=False)
+            # Filter to only uncovered sectors and take nearest ones
+            sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered_sectors][:num_drones]
+            # Among nearest sectors, assign highest battery drone to furthest of those nearest
+            sector_candidates.sort(key=lambda x: -x[1])  # Furthest of nearest first
+        else:
+            # When drones >= sectors: assign to furthest sectors
+            sectors_by_distance = self.get_sectors_by_distance(reverse=True)
+            sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered_sectors]
+
+        # Step 5: Greedy matching - highest battery drone to selected sector
         deployments = []
         warnings = []
 
         for drone in sorted_drones:
-            # Find an available sector (furthest first)
+            # Find an available sector from candidates
             assigned = False
-            for sector, distance in sectors_by_distance:
-                # Check if this sector is already assigned
+            for sector, distance in sector_candidates:
+                # Check if this sector is already assigned in our deployment plan
                 if any(d["sector"] == sector for d in deployments):
                     continue
 
-                # Simple battery check - must have > 40% to deploy
+                # Battery check - must have > 40% to deploy
                 if drone.battery > 40:
                     deployments.append({
                         "drone_id": drone.id,
                         "sector": sector,
                         "round_trip_distance": round(distance, 1),
                         "battery": round(drone.battery, 1),
-                        "safe": True
+                        "safe": True,
+                        "strategy": "nearest_first" if num_drones < num_sectors else "furthest_first"
                     })
                     assigned = True
                     break
@@ -739,13 +807,69 @@ class DroneManager:
         # Determine if deployment was successful
         successful_deployments = [d for d in deployments if d["safe"]]
 
+        strategy_note = "nearest sectors (drones < sectors)" if num_drones < num_sectors else "furthest sectors"
+
         return {
             "success": len(successful_deployments) > 0,
-            "message": f"Deployed {len(successful_deployments)} drones successfully",
+            "message": f"Deployed {len(successful_deployments)} drones to {strategy_note}",
             "deployments": successful_deployments,
             "warnings": warnings,
-            "fleet_status": self.get_fleet_status()
+            "fleet_status": self.get_fleet_status(),
+            "strategy": strategy_note
         }
+
+    def check_and_dispatch_to_uncovered(self, completed_drone_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if a drone has completed its sector and dispatch to uncovered sector if available.
+
+        Called when a drone finishes covering its assigned sector and returns to base.
+
+        Args:
+            completed_drone_id: The ID of the drone that completed its sector
+
+        Returns:
+            Deployment dict if dispatched, None if no action taken
+        """
+        drone = self.get_drone(completed_drone_id)
+        if not drone:
+            return None
+
+        # Check if drone has enough battery (> 40% required for new deployment)
+        if drone.battery <= 40:
+            logger.info(f"{completed_drone_id} has insufficient battery ({drone.battery}%) for new deployment")
+            return None
+
+        # Get uncovered sectors
+        uncovered = self.get_uncovered_sectors()
+        if not uncovered:
+            logger.info(f"No uncovered sectors available for {completed_drone_id}")
+            return None
+
+        # Sort uncovered sectors by distance
+        sectors_by_distance = self.get_sectors_by_distance(reverse=False)
+        sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered]
+
+        if not sector_candidates:
+            return None
+
+        # Pick the nearest uncovered sector
+        sector, distance = sector_candidates[0]
+
+        # Deploy the drone to the nearest uncovered sector
+        drone.assigned_sector = sector
+        drone.status = "DEPLOYING"
+
+        deployment = {
+            "drone_id": drone.id,
+            "sector": sector,
+            "round_trip_distance": round(distance, 1),
+            "battery": round(drone.battery, 1),
+            "safe": True,
+            "reason": "completed_sector"
+        }
+
+        logger.info(f"Dispatched {completed_drone_id} to nearest uncovered sector {sector}")
+        return deployment
 
     def command_return_to_base(self, drone_id: str) -> bool:
         """

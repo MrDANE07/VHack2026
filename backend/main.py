@@ -321,6 +321,17 @@ async def simulation_loop():
                         waypoint_index[drone_id] = 0
                         idx = 0
 
+                        # Drone completed a full sector sweep - check for uncovered sectors
+                        # Only dispatch if drone has enough battery (> 40%)
+                        if drone.battery > 40:
+                            deployment = drone_manager.check_and_dispatch_to_uncovered(drone_id)
+                            if deployment:
+                                # Update waypoints for new sector
+                                waypoints[drone_id] = generate_lawnmower_waypoints(deployment["sector"])
+                                waypoint_index[drone_id] = 0
+                                add_log("ACTION", f"Completed sector scan. Moving to Sector {deployment['sector']} (nearest uncovered).", drone_id)
+                                continue
+
                     target = wp_list[idx]
                     dx = target[0] - drone.position[0]
                     dz = target[2] - drone.position[2]
