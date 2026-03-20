@@ -1,12 +1,15 @@
 """DroneManager class for coordinating fleet operations."""
 
 import logging
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Callable
 from dataclasses import dataclass, field
 
 from drone import Drone
 
 logger = logging.getLogger(__name__)
+
+# Type alias for victim discovery callbacks
+VictimDiscoveryCallback = Callable[[str, int, int], None]
 
 
 # Grid state constants
@@ -53,13 +56,18 @@ class GridManager:
     """
 
     GRID_SIZE: int = 50  # 50×50 = 2,500 points
+    DETECTION_RADIUS: float = 4.0  # Distance at which a drone discovers a victim (matches main.py DETECTION_RANGE)
 
     def __init__(self):
         """Initialize the grid with all points set to UNEXPLORED."""
         # 2D array: grid[x][z] = state
         self.grid: Dict[Tuple[int, int], str] = {}
-        # Track victim IDs at coordinates
-        self._victims: Dict[Tuple[int, int], str] = {}
+        # Secret victims - unknown to the agent until discovered
+        self._secret_victims: Dict[Tuple[int, int], str] = {}
+        # Discovered victims - visible to the agent
+        self._discovered_victims: Dict[Tuple[int, int], str] = {}
+        # Callbacks for victim discovery notifications
+        self._discovery_callbacks: List[VictimDiscoveryCallback] = []
         self._initialize_grid()
 
     def _initialize_grid(self) -> None:
@@ -172,44 +180,112 @@ class GridManager:
         return summary
 
     def add_victim(self, x: float, z: float, victim_id: str) -> bool:
-        """Mark a grid point as containing a victim."""
+        """Mark a grid point as containing a secret victim (not discovered yet)."""
         cell_x, cell_z = int(x), int(z)
         if 0 <= cell_x < self.GRID_SIZE and 0 <= cell_z < self.GRID_SIZE:
-            self._victims[(cell_x, cell_z)] = victim_id
+            # Add to secret victims - agent has no knowledge of this
+            self._secret_victims[(cell_x, cell_z)] = victim_id
             self.grid[(cell_x, cell_z)] = GridState.VICTIM
-            logger.info(f"Victim {victim_id} added at ({cell_x}, {cell_z})")
+            logger.info(f"Secret victim {victim_id} placed at ({cell_x}, {cell_z})")
             return True
         return False
 
     def remove_victim(self, victim_id: str) -> bool:
-        """Remove a victim from the grid."""
-        for coord, v_id in self._victims.items():
+        """Remove a victim from the grid (both secret and discovered)."""
+        # Check discovered first
+        for coord, v_id in list(self._discovered_victims.items()):
             if v_id == victim_id:
                 x, z = coord
-                del self._victims[(x, z)]
-                # Reset to UNEXPLORED (or EXPLORED if it was visited)
-                current_state = self.get_state(x, z)
-                if current_state == GridState.VICTIM:
-                    self.set_state(x, z, GridState.UNEXPLORED)
+                del self._discovered_victims[(x, z)]
+                self._secret_victims.pop((x, z), None)
+                self.set_state(x, z, GridState.EXPLORED)
+                logger.info(f"Victim {victim_id} removed from grid (rescued)")
+                return True
+        # Check secret
+        for coord, v_id in list(self._secret_victims.items()):
+            if v_id == victim_id:
+                x, z = coord
+                del self._secret_victims[(x, z)]
+                self.set_state(x, z, GridState.UNEXPLORED)
                 logger.info(f"Victim {victim_id} removed from grid")
                 return True
         return False
 
     def get_victims(self) -> Dict[str, Dict[str, Any]]:
-        """Get all victims in the grid."""
+        """Get all victims in the grid (DEPRECATED - use get_discovered_victims)."""
+        # For backward compatibility, return discovered victims
+        return self.get_discovered_victims()
+
+    def get_discovered_victims(self) -> Dict[str, Dict[str, Any]]:
+        """Get only discovered victims - visible to the agent."""
         victims = {}
-        for (x, z), victim_id in self._victims.items():
+        for (x, z), victim_id in self._discovered_victims.items():
             victims[victim_id] = {
                 "id": victim_id,
                 "position": {"x": x, "z": z},
                 "world_x": float(x),
                 "world_z": float(z),
+                "discovered": True,
             }
         return victims
 
+    def get_secret_victims_count(self) -> int:
+        """Get count of undiscovered victims."""
+        return len(self._secret_victims)
+
+    def check_and_discover_victims(self, drone_x: float, drone_z: float) -> list:
+        """Check if drone is near any secret victims and discover them.
+
+        Returns list of newly discovered victim dicts with id and position.
+        Calls all registered discovery callbacks for real-time notifications.
+        """
+        discovered = []
+        drone_cell_x, drone_cell_z = int(drone_x), int(drone_z)
+
+        for (vx, vz), victim_id in list(self._secret_victims.items()):
+            # Check if within detection radius (including diagonal cells)
+            distance = ((drone_cell_x - vx) ** 2 + (drone_cell_z - vz) ** 2) ** 0.5
+            if distance <= self.DETECTION_RADIUS:
+                # Move from secret to discovered
+                del self._secret_victims[(vx, vz)]
+                self._discovered_victims[(vx, vz)] = victim_id
+                victim_data = {
+                    "id": victim_id,
+                    "position": {"x": vx, "z": vz},
+                    "world_x": float(vx),
+                    "world_z": float(vz),
+                    "discovered": True,
+                }
+                discovered.append(victim_data)
+                logger.info(f"DRONE discovered victim {victim_id} at ({vx}, {vz})")
+
+                # Notify all registered callbacks (MCP server can register these)
+                for callback in self._discovery_callbacks:
+                    try:
+                        callback(victim_id, vx, vz)
+                    except Exception as e:
+                        logger.error(f"Error in victim discovery callback: {e}")
+
+        return discovered
+
+    def register_discovery_callback(self, callback: VictimDiscoveryCallback) -> None:
+        """Register a callback to be notified when victims are discovered.
+
+        The callback receives: (victim_id: str, x: int, z: int)
+        """
+        self._discovery_callbacks.append(callback)
+        logger.info(f"Registered victim discovery callback: {callback}")
+
+    def unregister_discovery_callback(self, callback: VictimDiscoveryCallback) -> None:
+        """Unregister a discovery callback."""
+        if callback in self._discovery_callbacks:
+            self._discovery_callbacks.remove(callback)
+            logger.info(f"Unregistered victim discovery callback: {callback}")
+
     def clear_victims(self) -> None:
         """Remove all victims from the grid."""
-        self._victims.clear()
+        self._secret_victims.clear()
+        self._discovered_victims.clear()
         # Reset all VICTIM cells to UNEXPLORED
         for (x, z), state in self.grid.items():
             if state == GridState.VICTIM:
@@ -297,6 +373,9 @@ class DroneManager:
         self.grid_map: Dict[Tuple[int, int], GridCell] = {}
         self.grid_manager: GridManager = GridManager()  # 2,500 point grid
         self.selected_drone_id: Optional[str] = None
+        # Track last searched position per sector (for resuming interrupted searches)
+        # Format: {sector_id: {"z": last_z_row, "waypoint_index": last_index, "x_direction": 1 or -1}}
+        self._sector_resume_points: Dict[str, Dict[str, Any]] = {}
         self._initialize_grid()
 
     def _initialize_grid(self) -> None:
@@ -474,15 +553,22 @@ class DroneManager:
                     }
                 })
 
-        # Get victims from GridManager (50x50)
+        # Get ONLY discovered victims from GridManager (agent has no knowledge of secret ones)
         grid_victims = {}
-        victims = self.grid_manager.get_victims()
-        for victim_id, victim_data in victims.items():
+        discovered_victims = self.grid_manager.get_discovered_victims()
+        for victim_id, victim_data in discovered_victims.items():
             grid_victims[victim_id] = {
                 "id": victim_id,
                 "position": victim_data["position"],
                 "danger_level": 0.0  # Not implemented in GridManager yet
             }
+
+        # Note: Agent has NO knowledge of undiscovered victims - they must find them through searching
+
+        # Get sector coverage status
+        sector_coverage = self.get_drone_sector_coverage_status()
+        uncovered_sectors = self.get_uncovered_sectors()
+        fully_searched = self.get_fully_searched_sectors()
 
         return {
             "grid": {
@@ -491,6 +577,9 @@ class DroneManager:
                 "explored_percent": round(grid_summary["visited_percentage"], 1)
             },
             "sectors": sectors,
+            "sector_coverage": sector_coverage,
+            "uncovered_sectors": uncovered_sectors,
+            "fully_searched_sectors": list(fully_searched),
             "charging_base": {"x": 0, "z": 0},
             "victims": grid_victims,
             "drones": {
@@ -583,21 +672,140 @@ class DroneManager:
             for drone_id, drone in self.drones.items()
         }
 
-    def get_sectors_by_distance(self) -> List[Tuple[str, float]]:
+    def get_sectors_by_distance(self, reverse: bool = True) -> List[Tuple[str, float]]:
         """
-        Get all sectors sorted by distance from home base (furthest first).
+        Get all sectors sorted by distance from home base.
+
+        Args:
+            reverse: If True (default), sort by distance descending (furthest first).
+                    If False, sort by distance ascending (nearest first).
 
         Returns:
-            List of (sector, distance) tuples sorted by distance (descending)
+            List of (sector, distance) tuples sorted by distance
         """
         sectors_with_distance = []
         for sector in ["A", "B", "C", "D"]:
             distance = self.calculate_round_trip_distance(sector)
             sectors_with_distance.append((sector, distance))
 
-        # Sort by distance descending (furthest first)
-        sectors_with_distance.sort(key=lambda x: -x[1])
+        # Sort by distance
+        sectors_with_distance.sort(key=lambda x: x[1], reverse=reverse)
         return sectors_with_distance
+
+    def get_uncovered_sectors(self) -> List[str]:
+        """
+        Get list of sectors that:
+        1. Have no drone currently assigned/ searching AND
+        2. Are not fully searched (explored)
+
+        Returns:
+            List of sector IDs that are not covered and not fully searched
+        """
+        covered_sectors = set()
+        for drone in self.drones.values():
+            if drone.assigned_sector and drone.status in ["DEPLOYING", "SEARCHING", "TRACKING"]:
+                covered_sectors.add(drone.assigned_sector)
+
+        # Get sectors that are fully explored (searched)
+        fully_searched = self.get_fully_searched_sectors()
+
+        all_sectors = {"A", "B", "C", "D"}
+        # Exclude both covered and fully searched sectors
+        uncovered = list(all_sectors - covered_sectors - fully_searched)
+        return uncovered
+
+    def get_fully_searched_sectors(self, threshold: float = 95.0) -> set:
+        """
+        Get sectors that have been fully searched (explored).
+
+        Args:
+            threshold: Percentage of grid points that must be explored (default 95%)
+
+        Returns:
+            Set of sector IDs that are fully searched
+        """
+        sector_summary = self.grid_manager.get_sector_summary()
+        fully_searched = set()
+
+        for sector, stats in sector_summary.items():
+            if stats["percentage"] >= threshold:
+                fully_searched.add(sector)
+
+        return fully_searched
+
+    def update_sector_resume_point(self, sector: str, z_row: float, waypoint_index: int = 0, x_direction: int = 1) -> None:
+        """
+        Store the last search position for a sector when a drone returns early.
+
+        Args:
+            sector: Sector ID (A, B, C, or D)
+            z_row: The last Z row the drone was searching
+            waypoint_index: The last waypoint index
+            x_direction: 1 if moving right, -1 if moving left (for next drone)
+        """
+        self._sector_resume_points[sector] = {
+            "z_row": z_row,
+            "waypoint_index": waypoint_index,
+            "x_direction": x_direction,
+            "last_drone_id": None  # Will be set by caller
+        }
+        logger.info(f"Stored resume point for sector {sector}: z_row={z_row}, waypoint_index={waypoint_index}, direction={x_direction}")
+
+    def get_sector_resume_point(self, sector: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the resume point for a sector.
+
+        Args:
+            sector: Sector ID (A, B, C, or D)
+
+        Returns:
+            Dict with z_row, waypoint_index, x_direction or None if no resume point
+        """
+        return self._sector_resume_points.get(sector)
+
+    def clear_sector_resume_point(self, sector: str) -> None:
+        """Clear the resume point for a sector (when search is complete)."""
+        if sector in self._sector_resume_points:
+            del self._sector_resume_points[sector]
+            logger.info(f"Cleared resume point for sector {sector}")
+
+    def get_sector_progress(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Get progress information for all sectors including exploration percentage and resume points.
+
+        Returns:
+            Dict mapping sector ID to progress info (explored %, resume point, etc.)
+        """
+        sector_summary = self.grid_manager.get_sector_summary()
+        progress = {}
+
+        for sector in ["A", "B", "C", "D"]:
+            stats = sector_summary.get(sector, {"explored": 0, "total": 625, "percentage": 0.0})
+            resume_point = self._sector_resume_points.get(sector)
+
+            progress[sector] = {
+                "explored": stats["explored"],
+                "total": stats["total"],
+                "percentage": stats["percentage"],
+                "is_fully_searched": stats["percentage"] >= 95.0,
+                "has_resume_point": resume_point is not None,
+                "resume_point": resume_point
+            }
+
+        return progress
+
+    def get_drone_sector_coverage_status(self) -> Dict[str, bool]:
+        """
+        Get coverage status for each sector.
+
+        Returns:
+            Dict mapping sector ID to bool (True if covered, False otherwise)
+        """
+        coverage = {sector: False for sector in ["A", "B", "C", "D"]}
+        for drone in self.drones.values():
+            if drone.assigned_sector and drone.status in ["DEPLOYING", "SEARCHING", "TRACKING"]:
+                coverage[drone.assigned_sector] = True
+        return coverage
 
     def optimize_fleet_deployment(self) -> Dict[str, Any]:
         """
@@ -605,9 +813,11 @@ class DroneManager:
 
         Algorithm:
         1. Analyze fleet - get drone battery levels
-        2. Calculate distance - find sectors furthest from home base
-        3. Greedy matching - sort drones by battery (highest), sectors by distance (furthest)
-        4. Safety check - if round-trip > 80% of battery capacity, do NOT dispatch
+        2. Get uncovered sectors
+        3. If drones < uncovered sectors: prioritize NEAREST sectors, assign highest
+           battery drone to furthest among those nearest sectors
+        4. If drones >= uncovered sectors: assign highest battery drones to furthest sectors
+        5. Safety check - must have > 40% battery to deploy
 
         Returns:
             Dictionary with deployment plan and any safety warnings
@@ -623,61 +833,134 @@ class DroneManager:
                 "warnings": ["All drones are charging or have insufficient battery"]
             }
 
-        # Step 2: Sort drones by battery (highest first)
+        # Step 2: Get uncovered sectors (no drone currently searching)
+        uncovered_sectors = self.get_uncovered_sectors()
+
+        if not uncovered_sectors:
+            return {
+                "success": False,
+                "message": "All sectors already covered",
+                "deployments": [],
+                "warnings": ["No uncovered sectors available"],
+                "fleet_status": self.get_fleet_status()
+            }
+
+        # Step 3: Sort drones by battery (highest first)
         sorted_drones = sorted(available_drones, key=lambda d: -d.battery)
 
-        # Step 3: Get sectors sorted by distance (furthest first)
-        sectors_by_distance = self.get_sectors_by_distance()
+        # Step 4: Determine sector prioritization strategy
+        num_drones = len(sorted_drones)
+        num_sectors = len(uncovered_sectors)
 
-        # Step 4: Greedy matching with safety check
+        if num_drones < num_sectors:
+            # When drones < sectors: prioritize NEAREST sectors
+            # Get sectors sorted by distance ascending (nearest first)
+            sectors_by_distance = self.get_sectors_by_distance(reverse=False)
+            # Filter to only uncovered sectors and take nearest ones
+            sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered_sectors][:num_drones]
+            # Among nearest sectors, assign highest battery drone to furthest of those nearest
+            sector_candidates.sort(key=lambda x: -x[1])  # Furthest of nearest first
+        else:
+            # When drones >= sectors: assign to furthest sectors
+            sectors_by_distance = self.get_sectors_by_distance(reverse=True)
+            sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered_sectors]
+
+        # Step 5: Greedy matching - highest battery drone to selected sector
         deployments = []
         warnings = []
 
         for drone in sorted_drones:
-            # Calculate available battery capacity (80% of current battery)
-            battery_capacity = drone.battery * 0.8
-
-            # Find a suitable sector
+            # Find an available sector from candidates
             assigned = False
-            for sector, distance in sectors_by_distance:
-                # Check if this sector is already assigned
+            for sector, distance in sector_candidates:
+                # Check if this sector is already assigned in our deployment plan
                 if any(d["sector"] == sector for d in deployments):
                     continue
 
-                # Safety check: can drone make round trip?
-                if distance <= battery_capacity:
+                # Battery check - must have > 40% to deploy
+                if drone.battery > 40:
                     deployments.append({
                         "drone_id": drone.id,
                         "sector": sector,
                         "round_trip_distance": round(distance, 1),
                         "battery": round(drone.battery, 1),
-                        "battery_capacity_80": round(battery_capacity, 1),
-                        "safe": True
+                        "safe": True,
+                        "strategy": "nearest_first" if num_drones < num_sectors else "furthest_first"
                     })
                     assigned = True
                     break
-                else:
-                    # Sector too far for this drone
-                    warnings.append(
-                        f"{drone.id}: Cannot deploy to Sector {sector} - "
-                        f"round-trip {distance:.1f} exceeds 80% battery capacity ({battery_capacity:.1f})"
-                    )
 
             if not assigned:
                 warnings.append(
-                    f"{drone.id}: No suitable sector available - remaining sectors too far"
+                    f"{drone.id}: No suitable sector available - battery too low"
                 )
 
         # Determine if deployment was successful
         successful_deployments = [d for d in deployments if d["safe"]]
 
+        strategy_note = "nearest sectors (drones < sectors)" if num_drones < num_sectors else "furthest sectors"
+
         return {
             "success": len(successful_deployments) > 0,
-            "message": f"Deployed {len(successful_deployments)} drones successfully",
+            "message": f"Deployed {len(successful_deployments)} drones to {strategy_note}",
             "deployments": successful_deployments,
             "warnings": warnings,
-            "fleet_status": self.get_fleet_status()
+            "fleet_status": self.get_fleet_status(),
+            "strategy": strategy_note
         }
+
+    def check_and_dispatch_to_uncovered(self, completed_drone_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Check if a drone has completed its sector and dispatch to uncovered sector if available.
+
+        Called when a drone finishes covering its assigned sector and returns to base.
+
+        Args:
+            completed_drone_id: The ID of the drone that completed its sector
+
+        Returns:
+            Deployment dict if dispatched, None if no action taken
+        """
+        drone = self.get_drone(completed_drone_id)
+        if not drone:
+            return None
+
+        # Check if drone has enough battery (> 40% required for new deployment)
+        if drone.battery <= 40:
+            logger.info(f"{completed_drone_id} has insufficient battery ({drone.battery}%) for new deployment")
+            return None
+
+        # Get uncovered sectors
+        uncovered = self.get_uncovered_sectors()
+        if not uncovered:
+            logger.info(f"No uncovered sectors available for {completed_drone_id}")
+            return None
+
+        # Sort uncovered sectors by distance
+        sectors_by_distance = self.get_sectors_by_distance(reverse=False)
+        sector_candidates = [s for s in sectors_by_distance if s[0] in uncovered]
+
+        if not sector_candidates:
+            return None
+
+        # Pick the nearest uncovered sector
+        sector, distance = sector_candidates[0]
+
+        # Deploy the drone to the nearest uncovered sector
+        drone.assigned_sector = sector
+        drone.status = "DEPLOYING"
+
+        deployment = {
+            "drone_id": drone.id,
+            "sector": sector,
+            "round_trip_distance": round(distance, 1),
+            "battery": round(drone.battery, 1),
+            "safe": True,
+            "reason": "completed_sector"
+        }
+
+        logger.info(f"Dispatched {completed_drone_id} to nearest uncovered sector {sector}")
+        return deployment
 
     def command_return_to_base(self, drone_id: str) -> bool:
         """

@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from typing import Dict, Set, Optional, Any
+from typing import Dict, Set, Optional, Any, List
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -23,8 +23,9 @@ drones: Dict[str, Drone] = {}
 victims: Dict[str, Dict[str, Any]] = {}  # victim_id -> {position, detected}
 active_connections: Set[WebSocket] = set()
 selected_drone_id: Optional[str] = None
-pressed_keys: Dict[str, str] = {}  # connection_id -> key
-movement_task: Optional[asyncio.Task] = None
+
+# Client connection tracking for reset on new connections
+last_client_id: Optional[str] = None
 
 # Sector assignments for drones
 SECTOR_POSITIONS = {
@@ -85,7 +86,7 @@ def create_initial_drones() -> Dict[str, Drone]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown."""
-    global drones, movement_task, drone_manager, agent_trigger_event
+    global drones, drone_manager, agent_trigger_event
 
     logger.info("=" * 50)
     logger.info("Starting AEGIS Drone Control API")
@@ -98,22 +99,32 @@ async def lifespan(app: FastAPI):
     drone_manager = DroneManager()
     logger.info("DroneManager initialized")
 
+    # Register callback for victim discovery notifications to stdout
+    # This sends real-time events that MCP clients can receive
+    def victim_discovered_notification(victim_id: str, x: int, z: int) -> None:
+        """Send victim discovery notification to stdout for agent consumption."""
+        import sys
+        notification = {
+            "type": "VICTIM_DISCOVERY_NOTIFICATION",
+            "victim_id": victim_id,
+            "position": {"x": x, "z": z},
+            "message": f"VICTIM_DETECTED: {victim_id} at ({x}, {z})"
+        }
+        # Write to stdout - can be captured by MCP clients
+        print(f"MCP_NOTIFICATION: {json.dumps(notification)}", flush=True, file=sys.stdout)
+        logger.info(f"VICTIM DISCOVERY NOTIFICATION: {victim_id} at ({x}, {z})")
+
+    drone_manager.grid_manager.register_discovery_callback(victim_discovered_notification)
+    logger.info("Registered victim discovery callback for real-time notifications")
+
     # Start empty — frontend sends setup config via sync_config message
     drones = {}
     logger.info("Waiting for frontend configuration...")
 
-    movement_task = asyncio.create_task(movement_loop())
     simulation_task = asyncio.create_task(simulation_loop())
     agent_task = asyncio.create_task(agent_loop())
 
     yield
-
-    if movement_task:
-        movement_task.cancel()
-        try:
-            await movement_task
-        except asyncio.CancelledError:
-            pass
 
     if simulation_task:
         simulation_task.cancel()
@@ -142,33 +153,88 @@ app.add_middleware(
 )
 
 
-async def movement_loop():
+# Module-level helper functions for use by agent_loop
+def generate_lawnmower_waypoints(sector: str) -> list:
+    """Generate lawnmower pattern waypoints for a sector."""
+    bounds = {
+        "A": (0, 25, 0, 25),
+        "B": (25, 50, 0, 25),
+        "C": (0, 25, 25, 50),
+        "D": (25, 50, 25, 50),
+    }
+    min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
+
+    pts = []
+    padding = 2
+    spacing = 4
+    z = min_z + padding
+    going_right = True
+
+    while z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
+
+    return pts
+
+
+def generate_lawnmower_waypoints_from(sector: str, start_z: float, x_direction: int = 1) -> list:
     """
-    Game loop that runs continuously to apply movement
-    while keys are pressed. Broadcasts positions at ~30fps.
+    Generate lawnmower pattern waypoints for a sector, starting from a specific Z row.
+
+    Args:
+        sector: Sector ID (A, B, C, or D)
+        start_z: The Z row to start searching from
+        x_direction: 1 to start going right, -1 to start going left
+
+    Returns:
+        List of [x, y, z] waypoints
     """
-    global pressed_keys
+    bounds = {
+        "A": (0, 25, 0, 25),
+        "B": (25, 50, 0, 25),
+        "C": (0, 25, 25, 50),
+        "D": (25, 50, 25, 50),
+    }
+    min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
 
-    while True:
-        try:
-            await asyncio.sleep(1 / 30)  # 30fps
+    pts = []
+    padding = 2
+    spacing = 4
 
-            # Find the drone that should move based on pressed keys
-            for conn_id, key in list(pressed_keys.items()):
-                if key and selected_drone_id and selected_drone_id in drones:
-                    drone = drones[selected_drone_id]
-                    drone.move(key)
+    # Start from the resume Z row
+    z = start_z
+    # Determine initial direction based on x_direction
+    going_right = (x_direction == 1)
 
-                    # Drain battery while in manual mode
-                    drone.battery = max(0, drone.battery - 0.005)
+    while z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
 
-                    # Broadcast position update to all clients
-                    await broadcast_drone_state()
+    # If we started in the middle, also add the rows before start_z
+    z = min_z + padding
+    while z < start_z and z < max_z - padding:
+        if going_right:
+            pts.append([max_x - padding, 5, z])
+            pts.append([min_x + padding, 5, z])
+        else:
+            pts.append([min_x + padding, 5, z])
+            pts.append([max_x - padding, 5, z])
+        going_right = not going_right
+        z += spacing
 
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Error in movement loop: {e}")
+    return pts
 
 
 async def simulation_loop():
@@ -181,34 +247,6 @@ async def simulation_loop():
     # Waypoint tracking per drone
     waypoints: Dict[str, list] = {}
     waypoint_index: Dict[str, int] = {}
-
-    def generate_lawnmower_waypoints(sector: str) -> list:
-        """Generate lawnmower pattern waypoints for a sector."""
-        bounds = {
-            "A": (0, 25, 0, 25),
-            "B": (25, 50, 0, 25),
-            "C": (0, 25, 25, 50),
-            "D": (25, 50, 25, 50),
-        }
-        min_x, max_x, min_z, max_z = bounds.get(sector, (0, 50, 0, 50))
-
-        pts = []
-        padding = 2
-        spacing = 4
-        z = min_z + padding
-        going_right = True
-
-        while z < max_z - padding:
-            if going_right:
-                pts.append([max_x - padding, 5, z])
-                pts.append([min_x + padding, 5, z])
-            else:
-                pts.append([min_x + padding, 5, z])
-                pts.append([max_x - padding, 5, z])
-            going_right = not going_right
-            z += spacing
-
-        return pts
 
     def get_covered_sectors() -> set:
         """Get sectors that have active drones."""
@@ -249,10 +287,6 @@ async def simulation_loop():
 
             # Update each drone
             for drone_id, drone in list(drones.items()):
-                # MANUAL mode - skip (handled by movement_loop)
-                if drone.status == "MANUAL":
-                    continue
-
                 # CHARGING - gain battery
                 if drone.status == "CHARGING":
                     drone.battery = min(100, drone.battery + CHARGING_RATE)
@@ -283,9 +317,12 @@ async def simulation_loop():
                     drone.position = [0, 2, 0]
                     continue
 
-                # IDLE - stay at base
+                # IDLE - stay at base and charge if low battery
                 if drone.status == "IDLE":
                     drone.position = [0, 2, 0]
+                    # Auto-charge IDLE drones at base
+                    if drone.battery < 100:
+                        drone.battery = min(100, drone.battery + CHARGING_RATE)
                     continue
 
                 # RECALLING - return to base
@@ -307,6 +344,29 @@ async def simulation_loop():
                             drone.position[2] + (dz / dist) * speed,
                         ]
                     drone.battery = max(0, drone.battery - RECALL_BATTERY_DRAIN)
+                    continue
+
+                # MOVING - move to target position (agent-controlled)
+                if drone.status == "MOVING" and drone.target_position:
+                    tx, ty, tz = drone.target_position
+                    dx = tx - drone.position[0]
+                    dz = tz - drone.position[2]
+                    dist = (dx * dx + dz * dz) ** 0.5
+
+                    if dist < 2:
+                        # Arrived at target
+                        drone.position = [tx, ty, tz]
+                        drone.status = "SEARCHING"  # Switch to search after reaching target
+                        drone.target_position = None
+                        add_log("ACTION", f"Arrived at target position ({tx}, {tz}). Switching to search mode.", drone_id)
+                    else:
+                        speed = SEARCH_SPEED
+                        drone.position = [
+                            drone.position[0] + (dx / dist) * speed,
+                            ty,
+                            drone.position[2] + (dz / dist) * speed,
+                        ]
+                    drone.battery = max(0, drone.battery - SEARCH_BATTERY_DRAIN)
                     continue
 
                 # DEPLOYING - move to first waypoint
@@ -335,7 +395,26 @@ async def simulation_loop():
 
                 # SEARCHING - follow waypoints
                 if drone.status == "SEARCHING" and drone.assigned_sector:
-                    if drone_id not in waypoints or not waypoints[drone_id]:
+                    # Check if this is a resume deployment (drone started at a middle position)
+                    is_resume = hasattr(drone, '_resume_mode') and drone._resume_mode
+
+                    if is_resume:
+                        # Generate waypoints starting from the resume Z position
+                        if drone_id not in waypoints or not waypoints[drone_id]:
+                            resume_point = drone_manager.get_sector_resume_point(drone.assigned_sector)
+                            if resume_point:
+                                start_z = resume_point.get("z_row", 2)
+                                direction = resume_point.get("x_direction", 1)
+                                waypoints[drone_id] = generate_lawnmower_waypoints_from(
+                                    drone.assigned_sector, start_z, direction
+                                )
+                                waypoint_index[drone_id] = 0
+                                add_log("ACTION", f"Resuming search in sector {drone.assigned_sector} from z={start_z}", drone_id)
+                            else:
+                                waypoints[drone_id] = generate_lawnmower_waypoints(drone.assigned_sector)
+                                waypoint_index[drone_id] = 0
+                            drone._resume_mode = False  # Clear the flag
+                    elif drone_id not in waypoints or not waypoints[drone_id]:
                         waypoints[drone_id] = generate_lawnmower_waypoints(drone.assigned_sector)
                         waypoint_index[drone_id] = 0
 
@@ -345,6 +424,17 @@ async def simulation_loop():
                     if idx >= len(wp_list):
                         waypoint_index[drone_id] = 0
                         idx = 0
+
+                        # Drone completed a full sector sweep - check for uncovered sectors
+                        # Only dispatch if drone has enough battery (> 40%)
+                        if drone.battery > 40:
+                            deployment = drone_manager.check_and_dispatch_to_uncovered(drone_id)
+                            if deployment:
+                                # Update waypoints for new sector
+                                waypoints[drone_id] = generate_lawnmower_waypoints(deployment["sector"])
+                                waypoint_index[drone_id] = 0
+                                add_log("ACTION", f"Completed sector scan. Moving to Sector {deployment['sector']} (nearest uncovered).", drone_id)
+                                continue
 
                     target = wp_list[idx]
                     dx = target[0] - drone.position[0]
@@ -365,6 +455,26 @@ async def simulation_loop():
 
                     # Low battery - initiate RTB
                     if drone.battery <= LOW_BATTERY_THRESHOLD:
+                        # Store resume point before returning
+                        if drone.assigned_sector and drone_id in waypoints:
+                            wp_list = waypoints[drone_id]
+                            idx = waypoint_index.get(drone_id, 0)
+                            current_z = drone.position[2]
+                            # Determine direction based on current position relative to waypoint
+                            x_direction = 1  # default: next drone starts going right
+                            if idx < len(wp_list):
+                                next_wp = wp_list[idx]
+                                if next_wp[0] < drone.position[0]:
+                                    x_direction = -1
+                            # Store resume point in drone_manager
+                            drone_manager.update_sector_resume_point(
+                                drone.assigned_sector,
+                                current_z,
+                                idx,
+                                x_direction
+                            )
+                            add_log("REASONING", f"Resume point stored for sector {drone.assigned_sector}: z={current_z:.0f}, waypoint_idx={idx}", drone_id)
+
                         drone.status = "RECALLING"
                         add_log("ALERT", f"Low battery ({drone.battery:.0f}%). Returning to base.", drone_id)
 
@@ -405,32 +515,38 @@ async def simulation_loop():
 
             # Thermal detection check
             for victim_id, victim in list(victims.items()):
-                if victim.get("detected"):
-                    continue
-
-                vx, _, vz = victim["position"]
+                # Use GridManager's secret victim discovery system
+                # Check each searching drone for nearby undiscovered victims
                 for drone in drones.values():
-                    if drone.status != "SEARCHING":
+                    if drone.status not in ["SEARCHING", "DEPLOYING"]:
                         continue
 
-                    dx = drone.position[0] - vx
-                    dz = drone.position[2] - vz
-                    dist = (dx * dx + dz * dz) ** 0.5
+                    # Check GridManager for secret victims near this drone
+                    discovered = drone_manager.grid_manager.check_and_discover_victims(
+                        drone.position[0], drone.position[2]
+                    )
 
-                    if dist < DETECTION_RANGE:
-                        # Detected!
-                        victim["detected"] = True
+                    for victim_data in discovered:
+                        victim_id = victim_data["id"]
+                        vx = victim_data["position"]["x"]
+                        vz = victim_data["position"]["z"]
+
+                        # Update the local victims dict for frontend
+                        if victim_id in victims:
+                            victims[victim_id]["detected"] = True
+
+                        # Update drone to tracking
                         drone.status = "TRACKING"
                         drone.position = [vx, 3, vz]
                         drone.tracking_victim_id = victim_id
 
-                        add_log("REASONING", f"{drone.id} thermal scan positive. Tracking {victim_id}. Awaiting dispatch.", "COMMAND")
+                        add_log("REASONING", f"{drone.id} thermal scan positive! Discovered {victim_id} at ({vx}, {vz}). Tracking. Awaiting dispatch.", "COMMAND")
 
                         # Create alert for frontend
                         alerts.append({
                             "id": f"alert-{len(alerts)}",
                             "victimId": victim_id,
-                            "position": victim["position"],
+                            "position": {"x": vx, "y": 0, "z": vz},
                             "status": "AWAITING_DISPATCH",
                             "droneId": drone.id,
                         })
@@ -438,8 +554,7 @@ async def simulation_loop():
                         # Trigger agent to analyze detection and coordinate response
                         if agent_trigger_event:
                             agent_trigger_event.set()
-                            add_log("SYSTEM", f"Victim {victim_id} detected. Agent analyzing. Awaiting rescue dispatch approval.", "AGENT")
-                        break
+                            add_log("SYSTEM", f"VICTIM DISCOVERED: {victim_id} at ({vx}, {vz}). Agent analyzing. Awaiting rescue dispatch approval.", "AGENT")
 
             # Broadcast state
             await broadcast_drone_state()
@@ -600,10 +715,77 @@ async def agent_loop():
                         print(f"  - {tool_name}({tool_args})")
                         add_log("REASONING", f"[TOOL CALL] {tool_name}({tool_args})", "AGENT")
 
+                # Execute agent's chosen action
+                action_executed = False
+                if result.chosen_action and result.target_drone_id:
+                    drone = drones.get(result.target_drone_id)
+                    if drone:
+                        if result.chosen_action == "move_drone" and result.target_x is not None and result.target_z is not None:
+                            # Execute move_drone action
+                            drone.target_position = [result.target_x, 5, result.target_z]
+                            drone.status = "MOVING"
+                            add_log("ACTION", f"Executing: MOVE {result.target_drone_id} to ({result.target_x}, {result.target_z})", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "return_to_base":
+                            # Execute return_to_base action
+                            drone.status = "RECALLING"
+                            drone.assigned_sector = None
+                            add_log("ACTION", f"Executing: RETURN_TO_BASE {result.target_drone_id}", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "deploy_to_sector" and result.target_sector:
+                            # Validate before deploying
+                            target_sector = result.target_sector
+
+                            # Check if drone is already deployed to this sector
+                            if drone.assigned_sector == target_sector and drone.status in ["SEARCHING", "DEPLOYING"]:
+                                add_log("REASONING", f"Skipping: {result.target_drone_id} already deployed to Sector {target_sector}", "AGENT")
+                                action_executed = True  # Mark as handled, just skip
+                            # Check if sector is already covered by another drone
+                            elif target_sector in {
+                                d.assigned_sector for d in drones.values()
+                                if d.assigned_sector and d.status in ["SEARCHING", "DEPLOYING", "TRACKING"] and d.id != result.target_drone_id
+                            }:
+                                add_log("REASONING", f"Skipping: Sector {target_sector} already covered by another drone", "AGENT")
+                                action_executed = True
+                            # Check if sector is fully searched
+                            elif target_sector in drone_manager.get_fully_searched_sectors():
+                                add_log("REASONING", f"Skipping: Sector {target_sector} is already fully searched (95%+ explored)", "AGENT")
+                                action_executed = True
+                            else:
+                                # Execute deploy_to_sector action
+                                drone.assigned_sector = target_sector
+                                drone.status = "DEPLOYING"
+                                waypoints[result.target_drone_id] = generate_lawnmower_waypoints(target_sector)
+                                waypoint_index[result.target_drone_id] = 0
+                                add_log("ACTION", f"Executing: DEPLOY {result.target_drone_id} to Sector {target_sector}", "AGENT")
+                                action_executed = True
+
+                        elif result.chosen_action == "thermal_scan":
+                            # Execute thermal scan (immediate check for victims)
+                            current_x = int(drone.position[0])
+                            current_z = int(drone.position[2])
+                            grid_manager = drone_manager.grid_manager
+                            discovered = grid_manager.check_and_discover_victims(current_x, current_z)
+                            if discovered:
+                                for v in discovered:
+                                    add_log("ALERT", f"VICTIM DETECTED by {result.target_drone_id} at ({v.get('x')}, {v.get('z')})", "AGENT")
+                            add_log("ACTION", f"Executing: THERMAL_SCAN on {result.target_drone_id}", "AGENT")
+                            action_executed = True
+
+                        elif result.chosen_action == "evaluate_fleet":
+                            # Just log, no action needed
+                            add_log("ACTION", f"Executing: EVALUATE_FLEET - fleet status reviewed", "AGENT")
+                            action_executed = True
+
                 # Send logs to frontend (full reasoning, not truncated)
                 add_log("REASONING", f"[AGENT REASONING] {result.internal_monologue}", "AGENT")
                 add_log("REASONING", f"[BATTERY] {result.battery_analysis}", "AGENT")
-                add_log("ACTION", f"Recommended: {result.chosen_action.upper()} (risk: {result.risk_score:.2f})", "AGENT")
+                action_str = f"{result.chosen_action.upper()} (risk: {result.risk_score:.2f})"
+                if action_executed:
+                    action_str += " [EXECUTED]"
+                add_log("ACTION", f"Recommended: {action_str}", "AGENT")
 
                 # Broadcast updated state (includes new logs)
                 await broadcast_drone_state()
@@ -649,9 +831,6 @@ async def broadcast_drone_state():
     # Remove disconnected clients
     for conn in disconnected:
         active_connections.discard(conn)
-        conn_id = str(id(conn))
-        if conn_id in pressed_keys:
-            del pressed_keys[conn_id]
 
 
 async def broadcast_initial_state(websocket: WebSocket):
@@ -676,13 +855,30 @@ async def broadcast_initial_state(websocket: WebSocket):
 @app.websocket("/ws/drone-control")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for drone control."""
-    global selected_drone_id, drones, victims
+    global selected_drone_id, drones, victims, last_client_id, logs, alerts
 
     conn_id = str(id(websocket))
+    client_id = conn_id  # Each connection gets a unique ID
 
     await websocket.accept()
     active_connections.add(websocket)
-    pressed_keys[conn_id] = None
+
+    # Check if this is a new client (page refresh) - reset all state
+    is_new_client = last_client_id is None or last_client_id != client_id
+    if is_new_client:
+        logger.info(f"New client connected ({client_id}) - resetting backend state")
+        # Reset all backend state for fresh start
+        drones = {}
+        victims = {}
+        logs = []
+        alerts = []
+        # Clear DroneManager state
+        if drone_manager:
+            drone_manager.clear_victims()
+            drone_manager.clear_drones()
+        last_client_id = client_id
+    else:
+        logger.info(f"Reconnecting client: {conn_id}")
 
     logger.info(f"Client connected: {conn_id}")
 
@@ -697,57 +893,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             msg_type = message.get("type")
 
-            if msg_type == "keydown":
-                key = message.get("key")
-                drone_id = message.get("droneId")
-
-                logger.info(f"Key down: {key} from {drone_id}")
-
-                if drone_id and drone_id in drones:
-                    selected_drone_id = drone_id
-                    drone = drones[drone_id]
-                    drone.enter_manual_mode()
-
-                    # Map arrow keys to direction names
-                    key_map = {
-                        "ArrowUp": "up",
-                        "ArrowDown": "down",
-                        "ArrowLeft": "left",
-                        "ArrowRight": "right",
-                        "w": "up_alt",
-                        "W": "up_alt",
-                        "s": "down_alt",
-                        "S": "down_alt",
-                    }
-
-                    direction = key_map.get(key)
-                    if direction:
-                        pressed_keys[conn_id] = direction
-                        drone.last_key_pressed = direction
-
-            elif msg_type == "keyup":
-                key = message.get("key")
-                drone_id = message.get("droneId")
-
-                logger.info(f"Key up: {key} from {drone_id}")
-
-                pressed_keys[conn_id] = None
-
-                if drone_id and drone_id in drones:
-                    drone = drones[drone_id]
-
-                    # Check if any other connection is still pressing a key
-                    still_pressed = any(k is not None for k in pressed_keys.values())
-                    if not still_pressed:
-                        drone.exit_manual_mode()
-                        # Return to searching if battery sufficient, else RTB
-                        if drone.battery > 20:
-                            if drone.assigned_sector:
-                                drone.status = "SEARCHING"
-                        else:
-                            drone.status = "RECALLING"
-
-            elif msg_type == "select_drone":
+            if msg_type == "select_drone":
                 drone_id = message.get("droneId")
                 if drone_id and drone_id in drones:
                     selected_drone_id = drone_id
@@ -759,7 +905,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 victim_count = len(config.get('victims', []))
                 logger.info(f">>> Received sync_config: {drone_count} drones, {victim_count} victims")
                 logger.info(f"Drones: {[d.get('id') for d in config.get('drones', [])]}")
-                logger.info(f"Victims: {[v.get('id') for v in config.get('victims', [])]}")
 
                 # Reinitialize drones and victims from config
                 drones = {}
@@ -782,24 +927,22 @@ async def websocket_endpoint(websocket: WebSocket):
                     drone_manager.add_victim(position[0], position[2], victim_id)
 
                 # Process drones and create them via DroneManager
+                # Drones start in IDLE - deployment happens via start_mission using optimize_fleet_deployment
                 online_drones = [d for d in config.get("drones", []) if d.get("online")]
-                for i, d in enumerate(online_drones):
-                    # Assign sector based on index (A, B, C, D...)
-                    sector = SECTOR_ASSIGNMENTS[i % len(SECTOR_ASSIGNMENTS)]
-                    position = SECTOR_POSITIONS.get(sector, [0, 2, 0])
+                for d in online_drones:
                     battery = d.get("battery", 100)
 
-                    # Create drone via DroneManager
+                    # Create drone at base, waiting for mission start
                     drone = Drone(
                         id=d["id"],
                         battery=battery,
-                        position=position,
-                        status="SEARCHING",
-                        assigned_sector=sector,
+                        position=[0, 2, 0],  # At charging hub
+                        status="IDLE",
+                        assigned_sector=None,
                     )
                     drone_manager.drones[d["id"]] = drone
                     drones[d["id"]] = drone
-                    logger.info(f"  Drone {d['id']} (battery: {battery}%) -> Sector {sector}")
+                    logger.info(f"  Drone {d['id']} (battery: {battery}%) -> IDLE at base")
 
                 await websocket.send_text(json.dumps({
                     "type": "config_ack",
@@ -814,9 +957,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 logger.info(">>> Received start_mission message")
                 logger.info("Starting mission - assigning sectors")
 
-                # Use drone_manager's optimize_fleet_deployment for intelligent assignment
-                # This assigns highest battery drones to furthest sectors with safety checks
-                # (checks if round-trip distance fits within 80% battery capacity)
+                # Use drone_manager's optimize_fleet_deployment for assignment
+                # Assigns highest battery drones to furthest sectors
                 deployment_result = drone_manager.optimize_fleet_deployment()
                 logger.info(f"Fleet optimization result: {deployment_result['message']}")
 
@@ -887,12 +1029,9 @@ async def websocket_endpoint(websocket: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Client disconnected: {conn_id}")
         active_connections.discard(websocket)
-        if conn_id in pressed_keys:
-            del pressed_keys[conn_id]
-
-        # If this was the selected connection, clear selection
-        if not pressed_keys:
-            selected_drone_id = None
+        # If no more connections, reset for next client
+        if not active_connections:
+            logger.info("No active connections - backend will reset on next client connect")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         active_connections.discard(websocket)

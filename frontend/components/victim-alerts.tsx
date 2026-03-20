@@ -94,7 +94,9 @@ function AlertToast({
           <div className="flex items-center gap-2">
             <MapPin className="w-3.5 h-3.5 text-chart-1" />
             <span className="text-muted-foreground">
-              Coordinates: [{alert.coordinates[0].toFixed(1)}, {alert.coordinates[2].toFixed(1)}]
+              {alert.coordinates
+                ? `Coordinates: [${alert.coordinates[0].toFixed(1)}, ${alert.coordinates[2].toFixed(1)}]`
+                : "Coordinates: unknown"}
             </span>
           </div>
           <div className="flex items-center gap-2">

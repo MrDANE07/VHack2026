@@ -15,11 +15,10 @@ import { VictimMarker } from "./3d/victim-marker"
 interface DroneData {
   id: string
   position: [number, number, number]
-  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING" | "MANUAL"
+  status: "SEARCHING" | "SCANNING" | "RECALLING" | "IDLE" | "CHARGING" | "TRACKING" | "DEPLOYING"
   battery: number
   target?: [number, number, number]
   searchPattern: [number, number, number][]
-  manualMode?: boolean
 }
 
 interface VictimData {
@@ -168,7 +167,6 @@ export default function DroneSimulation({
           { color: "#10b981", label: "CHARGING" },
           { color: "#06b6d4", label: "DEPLOYING" },
           { color: "#4b5563", label: "IDLE" },
-          { color: "#a855f7", label: "MANUAL" },
         ].map(({ color, label }) => (
           <div key={label} className="flex items-center gap-2 py-0.5">
             <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: color, boxShadow: `0 0 4px ${color}` }} />

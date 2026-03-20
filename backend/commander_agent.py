@@ -42,7 +42,19 @@ class MissionThought(BaseModel):
     )
     chosen_action: str = Field(
         description="The specific action to take: move_drone, thermal_scan, verify_target, "
-        "return_to_base, evaluate_fleet, or wait"
+        "return_to_base, deploy_to_sector, evaluate_fleet, or wait"
+    )
+    target_drone_id: Optional[str] = Field(
+        description="The ID of the drone to control (e.g., 'drone-1', 'drone-2')"
+    )
+    target_x: Optional[float] = Field(
+        description="Target X coordinate for move_drone action (0-50)"
+    )
+    target_z: Optional[float] = Field(
+        description="Target Z coordinate for move_drone action (0-50)"
+    )
+    target_sector: Optional[str] = Field(
+        description="Target sector for deploy_to_sector (A, B, C, or D)"
     )
     risk_score: float = Field(
         description="Risk assessment from 0.0 (safe) to 1.0 (critical), considering battery, "
@@ -70,7 +82,7 @@ class AgentResult:
     tool_calls: list = field(default_factory=list)
 
 
-# Base system prompt that emphasizes battery analysis
+# Base system prompt that emphasizes battery analysis and sector tracking
 BASE_SYSTEM_PROMPT = """You are the AEGIS Swarm Commander Agent, responsible for coordinating
 autonomous drone search-and-rescue operations in a disaster zone.
 
@@ -80,6 +92,18 @@ Before every action, you must:
 1. Check the battery level of any drone you intend to use
 2. Calculate if there's sufficient battery for the action plus a 15% safety margin
 3. If battery is insufficient (< 20%), prioritize returning the drone to base
+
+SECTOR TRACKING - IMPORTANT:
+- Use get_sector_progress tool to check a sector's status before deploying
+- Sectors have three states: NOT_STARTED, INTERRUPTED (has resume point), FULLY_SEARCHED
+- When a drone returns due to low battery, a RESUME POINT is stored for that sector
+- Use deploy_to_sector_resume tool to continue from where the previous drone left off
+- NEVER deploy to a fully searched sector (95%+ explored) unless all sectors are searched
+
+When deploying to a sector with an interrupted search:
+1. Use get_sector_progress to check if there's a resume point
+2. Use deploy_to_sector_resume to continue from the saved position
+3. This ensures efficient coverage without duplicating search effort
 
 When a victim is detected:
 1. Acknowledge the detection in your reasoning
@@ -92,7 +116,25 @@ You don't need to explicitly notify the frontend - the system handles that. Your
 be on making good tactical decisions.
 
 Your goal is to maximize victim detection while ensuring no drone is stranded
-due to battery depletion. Coordinate the fleet strategically."""
+due to battery depletion. Coordinate the fleet strategically.
+
+OUTPUT FORMAT - When you respond, you MUST provide:
+- chosen_action: The action to take (move_drone, thermal_scan, return_to_base, deploy_to_sector, deploy_to_sector_resume, evaluate_fleet, or wait)
+- target_drone_id: The drone ID to control (e.g., "drone-1", "drone-2")
+- target_x: X coordinate (0-50) for move_drone action
+- target_z: Z coordinate (0-50) for move_drone action
+- target_sector: Sector (A, B, C, or D) for deploy_to_sector or deploy_to_sector_resume action
+- internal_monologue: Your reasoning
+- battery_analysis: Battery feasibility analysis
+- risk_score: Risk from 0.0 to 1.0
+
+Available drone IDs: drone-1, drone-2, drone-3, drone-4 (check actual available drones from fleet status)
+
+MCP Tools available:
+- get_sector_progress(sector): Check sector status and resume point before deploying
+- deploy_to_sector_resume(drone_id, sector): Deploy drone to continue interrupted search
+- get_grid_exploration(): Get overall exploration status with resume points
+- get_deployment_status(): Get coverage status and recommendations"""
 
 
 # Configure MCP server to connect to backend/mcp_server.py
@@ -118,17 +160,36 @@ async def get_dynamic_system_prompt(ctx: RunContext[DroneDeps]) -> str:
     """Dynamic system prompt that includes current world state."""
     world_state = ctx.deps.drone_manager.get_world_summary()
 
+    # Get victim info - only discovered victims are visible (agent has no knowledge of undiscovered ones)
+    victims = world_state.get('victims', {})
+    discovered_count = len(victims)
+
+    # Get fully searched sectors (95%+ explored)
+    fully_searched = ctx.deps.drone_manager.get_fully_searched_sectors()
+
+    # Get sector exploration details from grid manager
+    sector_summary = ctx.deps.drone_manager.grid_manager.get_sector_summary()
+
     world_summary = f"""Current World State:
 - Grid: {world_state['grid']['size']}x{world_state['grid']['size']}, {world_state['grid']['explored_percent']}% explored
-- Known victims: {len(world_state['victims'])}
-  {json.dumps(world_state['victims'], indent=2) if world_state['victims'] else 'None detected'}
+- Discovered victims: {discovered_count}
+  {json.dumps(victims, indent=2) if discovered_count > 0 else 'None detected - keep searching!'}
 - Charging base: ({world_state['charging_base']['x']}, {world_state['charging_base']['z']})
 
 Fleet Status:
 {json.dumps({k: v for k, v in world_state['drones'].items()}, indent=2)}
 
-Sectors:
-{json.dumps(world_state['sectors'], indent=2) if world_state['sectors'] else 'Not assigned'}"""
+Sector Exploration Status:
+{json.dumps(sector_summary, indent=2)}
+
+CRITICAL - Fully Searched Sectors (do NOT assign drones to these unless ALL sectors are searched):
+{', '.join(fully_searched) if fully_searched else 'None - all sectors need searching'}
+
+Sectors currently being searched (active drones):
+{json.dumps(world_state['sectors'], indent=2) if world_state['sectors'] else 'Not assigned'}
+
+Uncovered sectors (no drone searching AND not fully searched):
+{world_state.get('uncovered_sectors', [])}"""
 
     return f"{BASE_SYSTEM_PROMPT}\n\n{world_summary}"
 

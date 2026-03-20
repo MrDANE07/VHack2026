@@ -1,4 +1,4 @@
-"""Drone class for manual control simulation."""
+"""Drone class for autonomous search and rescue simulation."""
 
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
@@ -10,13 +10,14 @@ class Drone:
 
     id: str
     position: List[float] = field(default_factory=lambda: [0, 2, 0])
+    target_position: Optional[List[float]] = None
     status: str = "IDLE"
     battery: float = 100.0
     connected: bool = True
     assigned_sector: Optional[str] = None
     tracking_victim_id: Optional[str] = None
-    manual_mode: bool = False
-    last_key_pressed: Optional[str] = None
+    search_waypoint_index: int = 0
+    search_direction: int = 1
 
     # Movement bounds
     MIN_X: float = 0
@@ -50,35 +51,17 @@ class Drone:
 
         self.position = [x, y, z]
 
-    def enter_manual_mode(self) -> None:
-        """Enter manual control mode."""
-        if not self.manual_mode:
-            self.manual_mode = True
-            self.status = "MANUAL"
-            self.last_key_pressed = None
-
-    def exit_manual_mode(self) -> None:
-        """Exit manual control mode and return to autonomous behavior."""
-        self.manual_mode = False
-        self.last_key_pressed = None
-        # Default to IDLE if no sector assigned, will be overridden by main.py
-        if self.assigned_sector:
-            self.status = "SEARCHING"
-        else:
-            self.status = "IDLE"
-
     def get_state(self) -> Dict[str, Any]:
         """Return the current state of the drone."""
         return {
             "id": self.id,
             "position": self.position,
+            "targetPosition": self.target_position,
             "status": self.status,
             "battery": self.battery,
             "connected": self.connected,
             "assignedSector": self.assigned_sector,
             "trackingVictimId": self.tracking_victim_id,
-            "manualMode": self.manual_mode,
-            "lastKeyPressed": self.last_key_pressed,
         }
 
     def update_from_dict(self, data: Dict[str, Any]) -> None:
@@ -93,7 +76,3 @@ class Drone:
             self.assigned_sector = data["assignedSector"]
         if "trackingVictimId" in data:
             self.tracking_victim_id = data["trackingVictimId"]
-        if "manualMode" in data:
-            self.manual_mode = data["manualMode"]
-        if "lastKeyPressed" in data:
-            self.last_key_pressed = data["lastKeyPressed"]
