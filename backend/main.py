@@ -258,9 +258,12 @@ async def simulation_loop():
                     drone.position = [0, 2, 0]
                     continue
 
-                # IDLE - stay at base
+                # IDLE - stay at base and charge if low battery
                 if drone.status == "IDLE":
                     drone.position = [0, 2, 0]
+                    # Auto-charge IDLE drones at base
+                    if drone.battery < 100:
+                        drone.battery = min(100, drone.battery + CHARGING_RATE)
                     continue
 
                 # RECALLING - return to base
