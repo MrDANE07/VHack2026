@@ -267,7 +267,12 @@ function Dashboard({ config }: { config: SetupConfig }) {
                 id: a.id,
                 victimId: a.victimId,
                 timestamp: new Date(),
-                coordinates: a.position as [number, number, number],
+                // Backend sends position as object {x, y, z} or array [x, y, z]
+                coordinates: a.position
+                  ? Array.isArray(a.position)
+                    ? a.position as [number, number, number]
+                    : [a.position.x, a.position.y, a.position.z] as [number, number, number]
+                  : undefined,
                 detectedBy: a.droneId || "UNKNOWN",
                 status: a.status as VictimAlert["status"],
               })))

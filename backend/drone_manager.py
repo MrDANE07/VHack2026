@@ -1,12 +1,15 @@
 """DroneManager class for coordinating fleet operations."""
 
 import logging
-from typing import Dict, Optional, List, Any, Tuple
+from typing import Dict, Optional, List, Any, Tuple, Callable
 from dataclasses import dataclass, field
 
 from drone import Drone
 
 logger = logging.getLogger(__name__)
+
+# Type alias for victim discovery callbacks
+VictimDiscoveryCallback = Callable[[str, int, int], None]
 
 
 # Grid state constants
@@ -53,13 +56,18 @@ class GridManager:
     """
 
     GRID_SIZE: int = 50  # 50×50 = 2,500 points
+    DETECTION_RADIUS: float = 4.0  # Distance at which a drone discovers a victim (matches main.py DETECTION_RANGE)
 
     def __init__(self):
         """Initialize the grid with all points set to UNEXPLORED."""
         # 2D array: grid[x][z] = state
         self.grid: Dict[Tuple[int, int], str] = {}
-        # Track victim IDs at coordinates
-        self._victims: Dict[Tuple[int, int], str] = {}
+        # Secret victims - unknown to the agent until discovered
+        self._secret_victims: Dict[Tuple[int, int], str] = {}
+        # Discovered victims - visible to the agent
+        self._discovered_victims: Dict[Tuple[int, int], str] = {}
+        # Callbacks for victim discovery notifications
+        self._discovery_callbacks: List[VictimDiscoveryCallback] = []
         self._initialize_grid()
 
     def _initialize_grid(self) -> None:
@@ -172,44 +180,112 @@ class GridManager:
         return summary
 
     def add_victim(self, x: float, z: float, victim_id: str) -> bool:
-        """Mark a grid point as containing a victim."""
+        """Mark a grid point as containing a secret victim (not discovered yet)."""
         cell_x, cell_z = int(x), int(z)
         if 0 <= cell_x < self.GRID_SIZE and 0 <= cell_z < self.GRID_SIZE:
-            self._victims[(cell_x, cell_z)] = victim_id
+            # Add to secret victims - agent has no knowledge of this
+            self._secret_victims[(cell_x, cell_z)] = victim_id
             self.grid[(cell_x, cell_z)] = GridState.VICTIM
-            logger.info(f"Victim {victim_id} added at ({cell_x}, {cell_z})")
+            logger.info(f"Secret victim {victim_id} placed at ({cell_x}, {cell_z})")
             return True
         return False
 
     def remove_victim(self, victim_id: str) -> bool:
-        """Remove a victim from the grid."""
-        for coord, v_id in self._victims.items():
+        """Remove a victim from the grid (both secret and discovered)."""
+        # Check discovered first
+        for coord, v_id in list(self._discovered_victims.items()):
             if v_id == victim_id:
                 x, z = coord
-                del self._victims[(x, z)]
-                # Reset to UNEXPLORED (or EXPLORED if it was visited)
-                current_state = self.get_state(x, z)
-                if current_state == GridState.VICTIM:
-                    self.set_state(x, z, GridState.UNEXPLORED)
+                del self._discovered_victims[(x, z)]
+                self._secret_victims.pop((x, z), None)
+                self.set_state(x, z, GridState.EXPLORED)
+                logger.info(f"Victim {victim_id} removed from grid (rescued)")
+                return True
+        # Check secret
+        for coord, v_id in list(self._secret_victims.items()):
+            if v_id == victim_id:
+                x, z = coord
+                del self._secret_victims[(x, z)]
+                self.set_state(x, z, GridState.UNEXPLORED)
                 logger.info(f"Victim {victim_id} removed from grid")
                 return True
         return False
 
     def get_victims(self) -> Dict[str, Dict[str, Any]]:
-        """Get all victims in the grid."""
+        """Get all victims in the grid (DEPRECATED - use get_discovered_victims)."""
+        # For backward compatibility, return discovered victims
+        return self.get_discovered_victims()
+
+    def get_discovered_victims(self) -> Dict[str, Dict[str, Any]]:
+        """Get only discovered victims - visible to the agent."""
         victims = {}
-        for (x, z), victim_id in self._victims.items():
+        for (x, z), victim_id in self._discovered_victims.items():
             victims[victim_id] = {
                 "id": victim_id,
                 "position": {"x": x, "z": z},
                 "world_x": float(x),
                 "world_z": float(z),
+                "discovered": True,
             }
         return victims
 
+    def get_secret_victims_count(self) -> int:
+        """Get count of undiscovered victims."""
+        return len(self._secret_victims)
+
+    def check_and_discover_victims(self, drone_x: float, drone_z: float) -> list:
+        """Check if drone is near any secret victims and discover them.
+
+        Returns list of newly discovered victim dicts with id and position.
+        Calls all registered discovery callbacks for real-time notifications.
+        """
+        discovered = []
+        drone_cell_x, drone_cell_z = int(drone_x), int(drone_z)
+
+        for (vx, vz), victim_id in list(self._secret_victims.items()):
+            # Check if within detection radius (including diagonal cells)
+            distance = ((drone_cell_x - vx) ** 2 + (drone_cell_z - vz) ** 2) ** 0.5
+            if distance <= self.DETECTION_RADIUS:
+                # Move from secret to discovered
+                del self._secret_victims[(vx, vz)]
+                self._discovered_victims[(vx, vz)] = victim_id
+                victim_data = {
+                    "id": victim_id,
+                    "position": {"x": vx, "z": vz},
+                    "world_x": float(vx),
+                    "world_z": float(vz),
+                    "discovered": True,
+                }
+                discovered.append(victim_data)
+                logger.info(f"DRONE discovered victim {victim_id} at ({vx}, {vz})")
+
+                # Notify all registered callbacks (MCP server can register these)
+                for callback in self._discovery_callbacks:
+                    try:
+                        callback(victim_id, vx, vz)
+                    except Exception as e:
+                        logger.error(f"Error in victim discovery callback: {e}")
+
+        return discovered
+
+    def register_discovery_callback(self, callback: VictimDiscoveryCallback) -> None:
+        """Register a callback to be notified when victims are discovered.
+
+        The callback receives: (victim_id: str, x: int, z: int)
+        """
+        self._discovery_callbacks.append(callback)
+        logger.info(f"Registered victim discovery callback: {callback}")
+
+    def unregister_discovery_callback(self, callback: VictimDiscoveryCallback) -> None:
+        """Unregister a discovery callback."""
+        if callback in self._discovery_callbacks:
+            self._discovery_callbacks.remove(callback)
+            logger.info(f"Unregistered victim discovery callback: {callback}")
+
     def clear_victims(self) -> None:
         """Remove all victims from the grid."""
-        self._victims.clear()
+        self._secret_victims.clear()
+        self._discovered_victims.clear()
         # Reset all VICTIM cells to UNEXPLORED
         for (x, z), state in self.grid.items():
             if state == GridState.VICTIM:
@@ -474,15 +550,17 @@ class DroneManager:
                     }
                 })
 
-        # Get victims from GridManager (50x50)
+        # Get ONLY discovered victims from GridManager (agent has no knowledge of secret ones)
         grid_victims = {}
-        victims = self.grid_manager.get_victims()
-        for victim_id, victim_data in victims.items():
+        discovered_victims = self.grid_manager.get_discovered_victims()
+        for victim_id, victim_data in discovered_victims.items():
             grid_victims[victim_id] = {
                 "id": victim_id,
                 "position": victim_data["position"],
                 "danger_level": 0.0  # Not implemented in GridManager yet
             }
+
+        # Note: Agent has NO knowledge of undiscovered victims - they must find them through searching
 
         return {
             "grid": {
@@ -629,43 +707,33 @@ class DroneManager:
         # Step 3: Get sectors sorted by distance (furthest first)
         sectors_by_distance = self.get_sectors_by_distance()
 
-        # Step 4: Greedy matching with safety check
+        # Step 4: Greedy matching - highest battery drone to furthest sector
         deployments = []
         warnings = []
 
         for drone in sorted_drones:
-            # Calculate available battery capacity (80% of current battery)
-            battery_capacity = drone.battery * 0.8
-
-            # Find a suitable sector
+            # Find an available sector (furthest first)
             assigned = False
             for sector, distance in sectors_by_distance:
                 # Check if this sector is already assigned
                 if any(d["sector"] == sector for d in deployments):
                     continue
 
-                # Safety check: can drone make round trip?
-                if distance <= battery_capacity:
+                # Simple battery check - must have > 40% to deploy
+                if drone.battery > 40:
                     deployments.append({
                         "drone_id": drone.id,
                         "sector": sector,
                         "round_trip_distance": round(distance, 1),
                         "battery": round(drone.battery, 1),
-                        "battery_capacity_80": round(battery_capacity, 1),
                         "safe": True
                     })
                     assigned = True
                     break
-                else:
-                    # Sector too far for this drone
-                    warnings.append(
-                        f"{drone.id}: Cannot deploy to Sector {sector} - "
-                        f"round-trip {distance:.1f} exceeds 80% battery capacity ({battery_capacity:.1f})"
-                    )
 
             if not assigned:
                 warnings.append(
-                    f"{drone.id}: No suitable sector available - remaining sectors too far"
+                    f"{drone.id}: No suitable sector available - battery too low"
                 )
 
         # Determine if deployment was successful

@@ -118,10 +118,14 @@ async def get_dynamic_system_prompt(ctx: RunContext[DroneDeps]) -> str:
     """Dynamic system prompt that includes current world state."""
     world_state = ctx.deps.drone_manager.get_world_summary()
 
+    # Get victim info - only discovered victims are visible (agent has no knowledge of undiscovered ones)
+    victims = world_state.get('victims', {})
+    discovered_count = len(victims)
+
     world_summary = f"""Current World State:
 - Grid: {world_state['grid']['size']}x{world_state['grid']['size']}, {world_state['grid']['explored_percent']}% explored
-- Known victims: {len(world_state['victims'])}
-  {json.dumps(world_state['victims'], indent=2) if world_state['victims'] else 'None detected'}
+- Discovered victims: {discovered_count}
+  {json.dumps(victims, indent=2) if discovered_count > 0 else 'None detected - keep searching!'}
 - Charging base: ({world_state['charging_base']['x']}, {world_state['charging_base']['z']})
 
 Fleet Status:

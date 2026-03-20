@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import random
+import sys
 from typing import Dict, Any, Set
 
 import fastmcp
@@ -28,6 +29,27 @@ mcp = fastmcp.FastMCP("aegis-drone-command")
 # drone_manager will be set by initialize_drone_manager()
 active_connections: Set[Any] = set()
 
+# Callback for real-time victim discovery notifications
+# This will be sent via stdout in MCP protocol format
+def victim_discovered_callback(victim_id: str, x: int, z: int) -> None:
+    """Callback invoked when a drone discovers a victim.
+
+    Sends a real-time notification to the Commander Agent via stdout.
+    """
+    message = {
+        "type": "tool_result",
+        "tool": "VICTIM_DISCOVERY_NOTIFICATION",
+        "content": f"VICTIM_DETECTED: {victim_id} at coordinates ({x}, {z}). Thermal signature confirmed. Awaiting rescue dispatch.",
+        "data": {
+            "victim_id": victim_id,
+            "position": {"x": x, "z": z},
+            "alert": "Rescue team dispatch required"
+        }
+    }
+    # Write to stdout in JSON format for MCP protocol
+    print(json.dumps(message), flush=True)
+    logger.info(f"MCP Notification sent: VICTIM_DETECTED {victim_id}")
+
 # Simulated victims for thermal scanning
 SIMULATED_VICTIMS: Dict[str, Dict[str, Any]] = {
     "VICTIM-001": {"x": 15.0, "z": 18.0, "temp": 98.6, "confidence": 0.85},
@@ -43,9 +65,14 @@ def initialize_drone_manager() -> DroneManager:
     drone_manager = DroneManager()
     drone_manager.initialize_fleet()
 
-    # Add some initial victims to the grid
+    # Add some initial victims to the grid (secret - not visible to agent until discovered)
     for victim_id, data in SIMULATED_VICTIMS.items():
         drone_manager.add_victim(data["x"], data["z"], victim_id)
+
+    # Register callback for victim discovery notifications
+    # This sends real-time notifications to the Commander Agent
+    drone_manager.grid_manager.register_discovery_callback(victim_discovered_callback)
+    logger.info("Registered victim discovery callback for MCP notifications")
 
     # Mark some cells as visited
     for x in range(5):
@@ -475,19 +502,8 @@ async def get_world_state() -> str:
                     abandoned_sectors.append(sector)
                     break
 
-    # Get all known victims from GridManager (50x50)
-    victims = []
-    grid_victims = grid_manager.get_victims()
-    for victim_id, victim_data in grid_victims.items():
-        victims.append({
-            "victim_id": victim_id,
-            "grid_position": victim_data["position"],
-            "world_position": {
-                "x": victim_data["world_x"],
-                "z": victim_data["world_z"]
-            },
-            "danger_level": 0.0  # Not implemented in GridManager yet
-        })
+    # Get victim count only - agent should NOT know victim coordinates
+    victim_count = len(grid_manager.get_victims())
 
     # Get sector assignments
     sector_assignments = {}
@@ -519,7 +535,7 @@ async def get_world_state() -> str:
         },
         "nearest_unexplored": nearest_unexplored,
         "abandoned_sectors": abandoned_sectors,
-        "victims": victims,
+        "victim_count": victim_count,
         "sectors": sector_assignments,
         "charging_base": {"x": 0, "z": 0}
     }, indent=2)
